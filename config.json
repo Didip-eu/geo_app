@@ -1,0 +1,44 @@
+{
+  "repo": "Didip-eu/georeferencing",
+  "branch": "main",
+  "dataBranch": "annotations",
+  "csv": "placeofissuing_geonames.tsv",
+  "encoding": "utf-8",
+  "columns": {
+    "name": "placeName",
+    "lat": "latitude",
+    "lon": "longitude",
+    "link": "",
+    "id": "atomid",
+    "title": "",
+    "geonameId": "geonameId",
+    "country": "country",
+    "checkedBy": "checked.by",
+    "checkedWhen": "checked.when",
+    "checkedNotes": "checked.notes"
+  },
+  "derived": {
+    "link": {
+      "from": "atomid",
+      "pattern": "^tag:www\\.monasterium\\.net,2011:/charter/(\\S+)",
+      "template": "https://www.monasterium.net/mom/$1/charter"
+    },
+    "title": {
+      "from": "atomid",
+      "pattern": "^tag:www\\.monasterium\\.net,2011:/charter/(.+)$",
+      "template": "$1"
+    }
+  },
+  "nominatim": {
+    "countrycodes": "",
+    "t1": 5,
+    "t2": 25,
+    "lang": "en",
+    "email": ""
+  },
+  "decisionsDir": "annotations/decisions",
+  "autoDir": "annotations/auto",
+  "gazetteerDir": "annotations/gazetteer",
+  "nearbyKm": 5,
+  "output": "annotations/output/placeofissuing_geonames_reviewed.tsv"
+}
