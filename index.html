@@ -1305,7 +1305,7 @@ const S = {
   storeKey:null,
   sel:null, pending:null, draftNote:"", placing:false, coordErr:"",
   fa:"all", fd:"new", q:"", inView:false, sort:"count", filtered:[],
-  mineOn:false, assignByCountry:null, conflicts:new Map(), conflictGroups:new Set(), undo:[], rowOverride:new Set(), override:false, noteErr:"", localLog:{e:[], z:[]},
+  mineOn:false, myOn:true, assignByCountry:null, conflicts:new Map(), conflictGroups:new Set(), undo:[], rowOverride:new Set(), override:false, noteErr:"", localLog:{e:[], z:[]},
   autoNext: LS.get("gj2:autoNext", true),
   showAll: LS.get("gj2:showAll", false),
   places:new Map(), placesAll:new Map(), localPlaces:new Map(),
@@ -1454,7 +1454,31 @@ function setDataset(meta, rows){
 // config.json "assignments": {"<login>": ["<country>", ...]}; countries nobody has are open to everyone
 function assignedTo(g){ return S.assignByCountry ? S.assignByCountry.get(groupSrc(g, "country").v) || null : null; }
 function inScope(g){ const a = assignedTo(g); return !a || a.includes((G.login || "").toLowerCase()); }
-const scopeOk = g => !S.mineOn || inScope(g);
+/* "My countries": the country codes of Settings also limit the work list, "Next undecided" and the jump after a
+   decision to places whose source country is one of them. The data's English country names are matched to ISO codes
+   (browser country names plus aliases); "Austria and Hungary", "Saxony, Germany" etc. count for each country named. */
+const CC_ALIAS = {"czech republic":"cz", czech:"cz", england:"gb", scotland:"gb", wales:"gb", "wales (uk)":"gb", "northern ireland":"gb", "great britain":"gb",
+  holland:"nl", turkey:"tr", usa:"us", "united states of america":"us", russia:"ru", vatican:"va", "vatican city":"va", "holy see":"va", palestine:"ps",
+  "democratic republic of the congo":"cd", myanmar:"mm", "south tyrol":"it", saxony:"de", bavaria:"de", calabria:"it", sicily:"it"};
+let NAME2CC = null;
+function ccNorm(s){ return String(s || "").trim().toLowerCase().replace(/&/g, "and").replace(/^(the|possibly)\s+/, "").replace(/\s+/g, " "); }
+function codesOfCountry(name){
+  if (!NAME2CC){
+    NAME2CC = new Map();
+    try { const dn = new Intl.DisplayNames(["en"], {type:"region"});
+      for (let a = 65; a < 91; a++) for (let b = 65; b < 91; b++){ const c = String.fromCharCode(a, b); let n; try { n = dn.of(c); } catch(e){ continue; } if (n && n !== c) NAME2CC.set(ccNorm(n), c.toLowerCase()); } } catch(e){}
+  }
+  const one = k => CC_ALIAS[k] || NAME2CC.get(k) || "", k = ccNorm(name), whole = one(k);
+  if (whole || !k) return whole ? [whole] : [];
+  return [...new Set(k.split(/\s*(?:,|\/|\band\b|\bor\b)\s*/).map(x => one(ccNorm(x))).filter(Boolean))];
+}
+function myCodes(){ const cc = S.cfg.cc || ""; return cc && cc !== (S.ccDefault ?? "") ? cc.split(",") : []; }
+function inMyCountries(g){
+  const my = myCodes(); if (!my.length) return true;
+  if (g._myKey !== S.cfg.cc){ g._myKey = S.cfg.cc; g._myIn = codesOfCountry(groupSrc(g, "country").v).some(c => my.includes(c)); }
+  return g._myIn;
+}
+const scopeOk = g => (!S.mineOn || inScope(g)) && (!S.myOn || inMyCountries(g));
 const otherDecider = rec => G.on && rec && rec.by && rec.by.toLowerCase() !== (G.login || "").toLowerCase() ? rec.by : null;
 // a candidate row decided by, or assigned to, someone else is locked in "Confirm as one place" (unless overridden)
 function lockOf(h){
@@ -1744,7 +1768,7 @@ function renderRun(){
     : `Automatic check: ${nf.format(checked)} / ${nf.format(withName.length)} places · ${nf.format(c.match)} match, ${nf.format(c.near)} near, ${nf.format(c.mismatch)} mismatch, ${nf.format(c.notfound)} name not found`);
   panelSummary("run", RUN.msg || `Auto check ${nf.format(checked)} / ${nf.format(withName.length)} · ${RUN.on ? "running" : checked >= withName.length ? "done" : "paused"}`, !!RUN.msg);
   const ccTxt = cc => esc(cc ? cc.split(",").join(", ") : "whole world");
-  $("#runCC").innerHTML = (ownCC() ? `Suggestions from: <b>${ccTxt(S.cfg.cc)}</b> (your setting) · automatic check: <b>${ccTxt(projectCC())}</b> (project)` : `Name search in: <b>${ccTxt(projectCC())}</b>`)
+  $("#runCC").innerHTML = (myCodes().length ? `My countries: <b>${ccTxt(S.cfg.cc)}</b> (the list, the next place and the OSM suggestions)${ownCC() ? ` · automatic check: <b>${ccTxt(projectCC())}</b> (project)` : ""}` : `Name search in: <b>${ccTxt(projectCC())}</b>`)
     + ` · <button class="linkbtn" type="button" id="runCCEdit">change</button>`;
   $("#btnRun").textContent = RUN.on ? "Pause" : (checked ? (checked < withName.length ? "Continue check" : "All places checked") : "Start automatic check");
   $("#btnRun").disabled = !RUN.on && checked >= withName.length;
@@ -1812,7 +1836,7 @@ function panelSummary(k, text, attn){
 function renderFilterSummary(){
   const A = {problem:"Problems", outlier:"Outliers", mismatch:"Mismatch", near:"Near", notfound:"Name not found", nocoord:"No coordinates", match:"Match", pending:"Not checked"};
   const D = {new:"Not decided", ok:"Correct", fixed:"Corrected", unsure:"Uncertain", docs:"Per document", conflict:"Conflicts"}, SORT = {count:"by documents", name:"by name", dist:"by deviation"};
-  const parts = [S.mineOn && "Mine", S.fd !== "all" && D[S.fd], S.fa !== "all" && A[S.fa], S.inView && "visible map area"].filter(Boolean);
+  const parts = [S.mineOn && "Mine", S.myOn && myCodes().length && "countries " + myCodes().join(", "), S.fd !== "all" && D[S.fd], S.fa !== "all" && A[S.fa], S.inView && "visible map area"].filter(Boolean);
   panelSummary("filt", parts.length ? [...parts, SORT[S.sort]].join(" · ") : S.sort === "count" ? "All" : "All · " + SORT[S.sort], false);
 }
 
@@ -1834,13 +1858,14 @@ function renderChips(){
   const ca = {all:S.groups.length, problem:0, outlier:0, mismatch:0, near:0, notfound:0, nocoord:0, match:0, pending:0};
   const cd = {all:0, new:0, ok:0, fixed:0, unsure:0, docs:0, conflict:0}; let mine = 0;
   ca.all = 0;
-  for (const g of S.groups){ if (S.assignByCountry && inScope(g)) mine++; if (!scopeOk(g)) continue; ca.all++; cd.all++;
+  const my = myCodes(); let myN = 0;
+  for (const g of S.groups){ if (S.assignByCountry && inScope(g)) mine++; if (my.length && inMyCountries(g)) myN++; if (!scopeOk(g)) continue; ca.all++; cd.all++;
     const v = verdict(g), o = isOutlier(g); ca[v]++; if (o) ca.outlier++; if (PROBLEM.includes(v) || o) ca.problem++; cd[gStatus(g)]++; if (S.conflictGroups.has(g)) cd.conflict++; }
   const A = [["all","All"],["problem","Problems"],["outlier","Outliers"],["mismatch","Mismatch"],["near","Near"],["notfound","Name not found"],["nocoord","No coordinates"],["match","Match"],["pending","Not checked"]];
   const D = [["all","All"],["new","Not decided"],["ok","Correct"],["fixed","Corrected"],["unsure","Uncertain"],["docs","Per document"],["conflict","Conflicts"]].filter(([k]) => (k !== "conflict" && k !== "docs") || cd[k] || S.fd === k);
   $("#chipsA").innerHTML = `<span class="chiplabel">Automatic:</span>` + A.filter(([k]) => k === "all" || ca[k]).map(([k,l]) => `<button type="button" class="chip" data-fa="${k}" aria-pressed="${S.fa===k}">${l} <span class="n">${nf.format(ca[k])}</span></button>`).join("");
   renderFilterSummary();
-  $("#chipsD").innerHTML = `<span class="chiplabel">Decision:</span>` + (S.assignByCountry ? `<button type="button" class="chip" data-mine aria-pressed="${S.mineOn}" title="Your countries and the unassigned ones">Mine <span class="n">${nf.format(mine)}</span></button>` : "") + D.map(([k,l]) => `<button type="button" class="chip" data-fd="${k}" aria-pressed="${S.fd===k}">${l} <span class="n">${nf.format(cd[k])}</span></button>`).join("");
+  $("#chipsD").innerHTML = `<span class="chiplabel">Decision:</span>` + (my.length ? `<button type="button" class="chip" data-mycc aria-pressed="${S.myOn}" title="Places whose source country is one of your country codes (Settings)">My countries: ${esc(my.join(", "))} <span class="n">${nf.format(myN)}</span></button>` : "") + (S.assignByCountry ? `<button type="button" class="chip" data-mine aria-pressed="${S.mineOn}" title="Your countries and the unassigned ones">Mine <span class="n">${nf.format(mine)}</span></button>` : "") + D.map(([k,l]) => `<button type="button" class="chip" data-fd="${k}" aria-pressed="${S.fd===k}">${l} <span class="n">${nf.format(cd[k])}</span></button>`).join("");
 }
 function renderProgress(){
   const t = S.groups.length || 1; let ok=0, fx=0, un=0;
@@ -2886,7 +2911,7 @@ function openSettings(){
   const lockMsg = "Set in the project's config.json so that everybody works with the same values.";
   for (const id of ["#cfgT1","#cfgT2"]){ $(id).disabled = !!S.cfgLocked; $(id).title = S.cfgLocked ? lockMsg : ""; }
   const ccH = $("#cfgCCHint"); ccH.hidden = S.ccDefault == null; $("#cfgCCErr").hidden = true;
-  if (S.ccDefault != null) ccH.innerHTML = `Project default: <b>${esc(S.ccDefault || "whole world")}</b>. Your own choice is kept in this browser and changes the suggestions in the detail view; the shared automatic check keeps the project setting. <button class="linkbtn" type="button" id="cfgCCReset">Use the default</button>`;
+  if (S.ccDefault != null) ccH.innerHTML = `Project default: <b>${esc(S.ccDefault || "whole world")}</b>. Your own choice is kept in this browser. It limits the list and the jump to the next place to these countries (by the source's country column), and the OSM suggestions come from them; the shared automatic check keeps the project setting. <button class="linkbtn" type="button" id="cfgCCReset">Use the default</button>`;
   $("#cfgLang").disabled = !!S.langLocked; $("#cfgLang").title = S.langLocked ? lockMsg : "";
   $("#cfgName").closest("label").hidden = G.on;   // through GitHub, the login is recorded as the decider
   $("#dlgSettings").showModal();
@@ -2903,13 +2928,17 @@ function saveSettings(){
   if (S.cfg.t2 !== prevT2) for (const c of S.clusters) S.clDirty.add(c);
   LS.set("gj2:cfg", S.cfg);
   $("#dlgSettings").close();
+  if (prevCC !== S.cfg.cc) S.myOn = true;
   refreshAll();
-  if (G.on && S.ccDefault != null && prevCC !== S.cfg.cc){
-    loadOwnSugg();
-    if (S.sel && S.sel.kind === "group"){ renderDetail(); drawSel(); checkOwn(S.sel.g); }
-    toast(ownCC() ? `Suggestions now come from: ${S.cfg.cc || "the whole world"}. The shared automatic check keeps the project setting.` : "Back to the project's country codes.");
+  if (prevCC !== S.cfg.cc){
+    if (G.on && S.ccDefault != null){ loadOwnSugg(); if (S.sel && S.sel.kind === "group"){ renderDetail(); drawSel(); checkOwn(S.sel.g); } }
+    const my = myCodes(), names = new Map(); let n = 0;
+    for (const g of S.groups) if (my.length && inMyCountries(g)){ n++; const v = groupSrc(g, "country").v; names.set(v, (names.get(v) || 0) + 1); }
+    const top = [...names].sort((a, b) => b[1] - a[1]).map(([v]) => v).slice(0, 5).join(", ");
+    toast(!my.length ? "All countries again." : n ? `My countries: ${top} (${nf.format(n)} places). The list and “next” stay within them, and the OSM suggestions come from them.`
+      : `No place in the data has the country code ${my.join(", ")}, so the list is empty. Check the codes in Settings.`);
   }
-  else if ((prevCC !== S.cfg.cc || prevLang !== S.cfg.lang) && S.auto.size) toast("The country codes or the language changed. Use “Clear automatic results” if you want to re-run the old checks.");
+  else if (prevLang !== S.cfg.lang && S.auto.size) toast("The language changed. Use “Clear automatic results” if you want to re-run the old checks.");
   else toast("Settings saved.");
 }
 
@@ -3387,6 +3416,7 @@ function wire(){
   $("#chipsA").addEventListener("click", e => { const b = e.target.closest("[data-fa]"); if (!b) return; S.fa = b.dataset.fa; renderChips(); renderList(); });
   $("#chipsD").addEventListener("click", e => {
     if (e.target.closest("[data-mine]")){ S.mineOn = !S.mineOn; renderChips(); renderList(); return; }
+    if (e.target.closest("[data-mycc]")){ S.myOn = !S.myOn; refreshAll(); return; }
     const b = e.target.closest("[data-fd]"); if (!b) return; S.fd = b.dataset.fd; renderChips(); renderList(); });
   $("#q").addEventListener("input", e => { S.q = e.target.value; scheduleList(); });
   $("#inView").onchange = e => { S.inView = e.target.checked; renderList(); renderFilterSummary(); };
