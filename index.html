@@ -2974,6 +2974,24 @@ async function ghRaw(path, ref, asBuffer){
   if (!r.ok) throw await ghErr(r);
   return asBuffer ? r.arrayBuffer() : r.text();
 }
+// The data file (tens of MB): the REST API breaks off responses after about 10 s, too short for a slower line
+// ("Content-Length header of network response exceeds response Body"). So it is downloaded from its download_url
+// (raw.githubusercontent.com, compressed; for a private repository with a short-lived token in the URL), twice
+// if needed, and only then through the API.
+async function ghRawBig(path, ref){
+  let why = "";
+  try {
+    const r = await ghFetch(repoPath(path) + "?ref=" + encodeURIComponent(ref), {headers:{Accept:"application/vnd.github.object"}});
+    if (!r.ok) throw await ghErr(r);
+    const url = (await r.json()).download_url;
+    for (let attempt = 0; url && attempt < 2; attempt++){
+      try { const d = await fetch(url); if (d.ok) return await d.arrayBuffer(); why = `download error ${d.status}`; }
+      catch(e){ why = e.message || "network error"; }
+    }
+  } catch(e){ if (e.status === 401 || e.status === 404 || e.rate) throw e; why = e.message || why; }
+  try { return await ghRaw(path, ref, true); }
+  catch(e){ if (e.status) throw e; console.warn("data file download:", why, e.message); throw {message:`The download of ${path} broke off. Reload the page to try again; on a slow connection this can take a few attempts.`}; }
+}
 async function ghList(dir, ref){
   const r = await ghFetch(repoPath(dir) + "?ref=" + encodeURIComponent(ref));
   if (r.status === 404) return [];
@@ -3276,7 +3294,7 @@ async function loadGH(){
   ghStatus(`Loading data: ${G.owner}/${G.repo}…`);
   $("#dsinfo").textContent = "Loading data from GitHub…";
   try {
-    const buf = await ghRaw(G.cfg.csv, G.branch, true);
+    const buf = await ghRawBig(G.cfg.csv, G.branch);
     const parsed = parseDelimited(new TextDecoder(G.cfg.encoding || "utf-8").decode(buf));
     if (parsed.data.length < 2) throw {message:"The data file is empty or unreadable."};
     imp = parsedToImp(parsed, G.cfg.csv.split("/").pop());
