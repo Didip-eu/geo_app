@@ -1685,12 +1685,12 @@ function nomi(path, params){
   };
   const p = chain.then(run, run); chain = p.catch(() => {}); return p;
 }
-async function checkGroup(g){
+async function checkGroup(g, cc = projectCC()){
   const res = {at:Date.now(), c:[], d:null, rs:0, rb:"", rv:""};
   const lang = S.cfg.lang || DEFAULT_CFG.lang;
   if (g.name){
     const p = {q:g.name, format:"jsonv2", limit:10, namedetails:1, addressdetails:1, extratags:1, "accept-language":lang};
-    if (S.cfg.cc) p.countrycodes = S.cfg.cc.replace(/\s+/g, "");
+    if (cc) p.countrycodes = cc.replace(/\s+/g, "");
     const arr = await nomi("search", p);
     res.c = (arr || []).map(r => ({n: r.name || shortDisp(r.display_name).split(",")[0], lat:+r.lat, lon:+r.lon, t: r.addresstype || r.type || "", ty: r.type || "", x: shortDisp(r.display_name),
       ot: r.osm_type || "", oi: r.osm_id ?? "", wp: (r.extratags && r.extratags.wikipedia) || "", wd: (r.extratags && r.extratags.wikidata) || ""}));
@@ -1713,6 +1713,22 @@ async function checkGroup(g){
   return res;
 }
 
+/* Country codes. The shared automatic check (verdicts, annotations/auto, the export) searches with the project's
+   codes (config.json). An annotator's own choice (Settings) only changes the suggestions in the detail view: they
+   come from a separate search and are kept in this browser, so a narrow search never overwrites shared results. */
+function projectCC(){ return G.on && S.ccDefault != null ? S.ccDefault : (S.cfg.cc || ""); }
+function ownCC(){ return G.on && S.ccDefault != null && (S.cfg.cc || "") !== S.ccDefault; }
+function loadOwnSugg(){ const o = LS.get("gj2:ccauto", null); S.ccAuto = new Map(o && o.cc === S.cfg.cc ? Object.entries(o.items || {}) : []); }
+function saveOwnSugg(){ LS.set("gj2:ccauto", {cc:S.cfg.cc, items:Object.fromEntries([...S.ccAuto].slice(-3000))}); }
+function sugg(g){ return ownCC() ? (S.ccAuto && S.ccAuto.get(g.key)) || null : S.auto.get(g.key); }
+async function checkOwn(g){
+  if (!g.name || !ownCC()) return;
+  const cc = S.cfg.cc;
+  try { const r = await checkGroup(g, cc); if (S.cfg.cc !== cc) return; S.ccAuto.set(g.key, r); saveOwnSugg(); }
+  catch(e){ toast(e.message || "The search failed."); return; }
+  if (S.sel && S.sel.g === g){ renderDetail(); drawSel(); }
+}
+
 const RUN = {on:false, done:0, total:0, msg:""};
 function runStatus(msg){ RUN.msg = msg || ""; renderRun(); }
 function renderRun(){
@@ -1727,7 +1743,9 @@ function renderRun(){
     ? `Checking: ${nf.format(checked)} / ${nf.format(withName.length)} places…`
     : `Automatic check: ${nf.format(checked)} / ${nf.format(withName.length)} places · ${nf.format(c.match)} match, ${nf.format(c.near)} near, ${nf.format(c.mismatch)} mismatch, ${nf.format(c.notfound)} name not found`);
   panelSummary("run", RUN.msg || `Auto check ${nf.format(checked)} / ${nf.format(withName.length)} · ${RUN.on ? "running" : checked >= withName.length ? "done" : "paused"}`, !!RUN.msg);
-  $("#runCC").innerHTML = `Name search in: <b>${esc(S.cfg.cc ? S.cfg.cc.split(",").join(", ") : "whole world")}</b> · <button class="linkbtn" type="button" id="runCCEdit">change</button>`;
+  const ccTxt = cc => esc(cc ? cc.split(",").join(", ") : "whole world");
+  $("#runCC").innerHTML = (ownCC() ? `Suggestions from: <b>${ccTxt(S.cfg.cc)}</b> (your setting) · automatic check: <b>${ccTxt(projectCC())}</b> (project)` : `Name search in: <b>${ccTxt(projectCC())}</b>`)
+    + ` · <button class="linkbtn" type="button" id="runCCEdit">change</button>`;
   $("#btnRun").textContent = RUN.on ? "Pause" : (checked ? (checked < withName.length ? "Continue check" : "All places checked") : "Start automatic check");
   $("#btnRun").disabled = !RUN.on && checked >= withName.length;
   const acc = S.groups.filter(g => verdict(g) === "match" && gStatus(g) === "new").length;
@@ -1907,7 +1925,7 @@ function drawSel(){
   if (!S.sel) return;
   const mark = cssVar("--mark"), muted = cssVar("--muted"), conf = confirmMode();
   const orig = selOrig(), cur = conf ? S.gzCtx.pos : S.pending || selPos();
-  const a = S.auto.get(S.sel.g.key);
+  const a = sugg(S.sel.g);
   if (a) for (const c of a.c){
     L.marker([c.lat, c.lon], {pane:"cand", keyboard:false, icon:L.divIcon({className:"cand-ic", html:"<span></span>", iconSize:[16,16], iconAnchor:[8,8]})})
       .bindTooltip(`OSM match: ${esc(c.n)}${c.t ? " (" + esc(c.t) + ")" : ""}${c.d != null ? " · " + kmTxt(c.d) : ""}<br>Click for details`, {direction:"top", offset:[0,-8]})
@@ -1966,7 +1984,7 @@ function siblingInfo(p){
 // Fit the selected point, all same-name groups (so a far-away mis-geocode is visible) and the nearest OSM match.
 function fitSel(){
   if (confirmMode()) return;   // the candidate map fits itself (drawPicks)
-  const g = S.sel.g, a = S.auto.get(g.key), p = selPos();
+  const g = S.sel.g, a = sugg(g), p = selPos();
   const pts = []; if (p) pts.push([p.lat, p.lon]);
   for (const s of g.siblings || []){ const q = gPos(s); if (q) pts.push([q.lat, q.lon]); }
   if (a && a.c.length){ const c = a.c[0]; if (!p || c.d == null || c.d < 800) pts.push([c.lat, c.lon]); }
@@ -1980,6 +1998,7 @@ function selectGroup(g, fly=true){
   if (fly) fitSel();
   markListCurrent();
   if (g.name && !S.auto.has(g.key) && !RUN.on) checkOne(g).then(() => { if (S.sel && S.sel.g === g && fly) fitSel(); });
+  if (g.name && ownCC() && !S.ccAuto.has(g.key)) checkOwn(g).then(() => { if (S.sel && S.sel.g === g && fly) fitSel(); });
 }
 function selectRow(i, fly=true){
   if (S.selecting) setSelecting(false);
@@ -2428,7 +2447,7 @@ function autoExplain(g){
   const near = a.c[0];
   const parts = [];
   if (near) parts.push(`The nearest OSM match named “${esc(g.name)}” is ${kmTxt(near.d)} away: ${esc(near.x)}.`);
-  else parts.push(`OSM has no place named “${esc(g.name)}”${S.cfg.cc ? " in the selected countries" : ""}.`);
+  else parts.push(`OSM has no place named “${esc(g.name)}”${projectCC() ? " in the selected countries" : ""}.`);
   if (a.rv) parts.push(`At the coordinates OSM has: ${esc(a.rv)}${a.rs >= 0.85 ? ` — this matches the name (${esc(a.rb)}).` : "."}`);
   if (v === "notfound") parts.push("It may be a historical or Latin name form: look up its modern name and compare.");
   return parts.join(" ");
@@ -2442,7 +2461,7 @@ function renderDetail(){
   const own = isRow ? rRec(S.sel.idx) : null;
   const changed = S.pending && (!cur || Math.abs(S.pending.lat-cur.lat) > 1e-7 || Math.abs(S.pending.lon-cur.lon) > 1e-7);
   const moved = orig && shown && dist(orig, shown) > 0.01 ? dist(orig, shown) : null;
-  const v = verdict(g), a = S.auto.get(g.key);
+  const v = verdict(g), a = S.auto.get(g.key), sa = sugg(g);
   const focusId = document.activeElement && document.activeElement.id;
   const idx = S.filtered.indexOf(g);
 
@@ -2483,7 +2502,8 @@ function renderDetail(){
 
   html += `<div class="sect"><h3>Name and coordinates</h3>
     <div class="verdict" style="border-left-color:${cssVar(AUTO[v].v)}"><b>${AUTO[v].label}</b>${autoExplain(g)}</div>
-    ${a && a.c.length ? `<ul class="sugg" style="margin-top:8px">${a.c.map(c => `<li class="osmrow"><div class="cmain"><span><b>${esc(c.n)}</b>${candType(c)} <span class="m">${esc(c.x)}${c.d != null ? " · " + kmTxt(c.d) : ""}</span></span>${candLinks(c)}</div><button class="btn small" type="button" data-take="${c.lat},${c.lon}">Use</button></li>`).join("")}</ul>` : ""}
+    ${ownCC() ? `<p class="hint" style="margin:8px 0 0">${sa ? (sa.c.length ? `OSM places named “${esc(g.name)}” in <b>${esc(S.cfg.cc)}</b> (your setting):` : `OSM has no place named “${esc(g.name)}” in <b>${esc(S.cfg.cc)}</b> (your setting).`) : `Searching in <b>${esc(S.cfg.cc)}</b> (your setting)…`}</p>` : ""}
+    ${sa && sa.c.length ? `<ul class="sugg" style="margin-top:8px">${sa.c.map(c => `<li class="osmrow"><div class="cmain"><span><b>${esc(c.n)}</b>${candType(c)} <span class="m">${esc(c.x)}${c.d != null ? " · " + kmTxt(c.d) : ""}</span></span>${candLinks(c)}</div><button class="btn small" type="button" data-take="${c.lat},${c.lon}">Use</button></li>`).join("")}</ul>` : ""}
     <div class="acts">${g.name ? `<button class="btn small" type="button" id="btnRecheck">${a ? "Check again" : "Check now"}</button>` : ""}</div>
   </div>`;
 
@@ -2866,7 +2886,7 @@ function openSettings(){
   const lockMsg = "Set in the project's config.json so that everybody works with the same values.";
   for (const id of ["#cfgT1","#cfgT2"]){ $(id).disabled = !!S.cfgLocked; $(id).title = S.cfgLocked ? lockMsg : ""; }
   const ccH = $("#cfgCCHint"); ccH.hidden = S.ccDefault == null; $("#cfgCCErr").hidden = true;
-  if (S.ccDefault != null) ccH.innerHTML = `Project default: <b>${esc(S.ccDefault || "whole world")}</b>. Your own choice is kept in this browser. <button class="linkbtn" type="button" id="cfgCCReset">Use the default</button>`;
+  if (S.ccDefault != null) ccH.innerHTML = `Project default: <b>${esc(S.ccDefault || "whole world")}</b>. Your own choice is kept in this browser and changes the suggestions in the detail view; the shared automatic check keeps the project setting. <button class="linkbtn" type="button" id="cfgCCReset">Use the default</button>`;
   $("#cfgLang").disabled = !!S.langLocked; $("#cfgLang").title = S.langLocked ? lockMsg : "";
   $("#cfgName").closest("label").hidden = G.on;   // through GitHub, the login is recorded as the decider
   $("#dlgSettings").showModal();
@@ -2884,7 +2904,12 @@ function saveSettings(){
   LS.set("gj2:cfg", S.cfg);
   $("#dlgSettings").close();
   refreshAll();
-  if ((prevCC !== S.cfg.cc || prevLang !== S.cfg.lang) && S.auto.size) toast("The country codes or the language changed. Use “Clear automatic results” if you want to re-run the old checks.");
+  if (G.on && S.ccDefault != null && prevCC !== S.cfg.cc){
+    loadOwnSugg();
+    if (S.sel && S.sel.kind === "group"){ renderDetail(); drawSel(); checkOwn(S.sel.g); }
+    toast(ownCC() ? `Suggestions now come from: ${S.cfg.cc || "the whole world"}. The shared automatic check keeps the project setting.` : "Back to the project's country codes.");
+  }
+  else if ((prevCC !== S.cfg.cc || prevLang !== S.cfg.lang) && S.auto.size) toast("The country codes or the language changed. Use “Clear automatic results” if you want to re-run the old checks.");
   else toast("Settings saved.");
 }
 
@@ -3294,6 +3319,7 @@ async function startGH(cfg){
   for (const [login, list] of Object.entries(cfg.assignments || {})) for (const cn of list || []){ const k = String(cn).trim(); if (!asg.has(k)) asg.set(k, []); asg.get(k).push(login.toLowerCase()); }
   S.assignByCountry = asg.size ? asg : null; S.mineOn = !!S.assignByCountry;
   S.langLocked = !!nm.lang;
+  loadOwnSugg();
   G.token = LS.get("gj2:ghtoken:" + repo, "");
   if (G.token && !(await ghAuth())){ G.token = ""; }
   ghStatus();
@@ -3392,7 +3418,7 @@ function wire(){
     if (t.id === "btnPlaceSettings"){ openPlaceSettings(); return; }
     if (t.id === "btnDiscard"){ S.pending = null; S.coordErr = ""; S.draftCo = null; S.coTouched = false; renderDetail(); drawSel(); return; }
     if (t.id === "coordGo"){ applyCoordInput(); return; }
-    if (t.id === "btnRecheck"){ const g = S.sel.g; t.disabled = true; t.textContent = "Checking…"; S.auto.delete(g.key); checkOne(g).then(() => { if (S.sel && S.sel.g === g) fitSel(); }); return; }
+    if (t.id === "btnRecheck"){ const g = S.sel.g; t.disabled = true; t.textContent = "Checking…"; S.auto.delete(g.key); checkOne(g).then(() => { if (S.sel && S.sel.g === g) fitSel(); }); if (ownCC()){ S.ccAuto.delete(g.key); checkOwn(g); } return; }
     const a = t.closest("[data-act]"); if (a){ act(a.dataset.act); return; }
     const uc = t.closest("[data-useco]"); if (uc){ $("#coIn").value = S.draftCo = uc.dataset.useco; S.coTouched = true; if (S.pending) { $("#coHint").hidden = true; } else act("note"); return; }
     const tk = t.closest("[data-take]"); if (tk){ const [la, lo] = tk.dataset.take.split(",").map(Number); setPending({lat:la, lon:lo}, true); flyTo({lat:la, lon:lo}, 11); return; }
