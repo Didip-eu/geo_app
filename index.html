@@ -2415,9 +2415,11 @@ async function lookupGid(){
   const name = ($("#gzName").value || "").trim(), btn = $("#gzLookup"); if (!name) return;
   btn.disabled = true; btn.textContent = "Looking up…";
   try {
-    const p = {q:name, format:"jsonv2", limit:5, extratags:1, "accept-language":"en"};
-    if (S.cfg.cc) p.countrycodes = S.cfg.cc.replace(/\s+/g, "");
-    const arr = (await nomi("search", p) || []).filter(r => r.extratags && r.extratags.wikidata);
+    // not limited to "My countries": a historical place of one country often lies in another today (Cehăluț, once in
+    // Hungary, is in Romania). The project's codes are tried first, then the whole world.
+    const find = async cc => { const p = {q:name, format:"jsonv2", limit:5, extratags:1, "accept-language":"en"}; if (cc) p.countrycodes = cc.replace(/\s+/g, "");
+      return (await nomi("search", p) || []).filter(r => r.extratags && r.extratags.wikidata); };
+    let arr = await find(projectCC()); if (!arr.length && projectCC()) arr = await find("");
     const pos = S.gzCtx && S.gzCtx.pos;
     if (pos) arr.sort((a, b) => dist(pos, {lat:+a.lat, lon:+a.lon}) - dist(pos, {lat:+b.lat, lon:+b.lon}));
     if (!arr.length){ toast(`No OSM result with a Wikidata link for “${name}”.`); return; }
