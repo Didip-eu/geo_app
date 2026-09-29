@@ -971,6 +971,7 @@ dialog::backdrop{ background:rgba(10,20,28,.45); }
         <div class="pnl-b" id="runBody">
           <p id="runText"></p>
           <div class="bar" aria-hidden="true"><span id="runBar" style="background:var(--accent)"></span></div>
+          <p class="hint" id="runCC"></p>
           <div class="row">
             <button class="btn small" id="btnRun" type="button">Start automatic check</button>
             <button class="btn small" id="btnAccept" type="button" disabled>Accept matches</button>
@@ -1068,7 +1069,9 @@ dialog::backdrop{ background:rgba(10,20,28,.45); }
     <header><h2 id="setTitle">Settings</h2><button class="btn small" type="button" data-close>Close</button></header>
     <div class="body form">
       <label>Your name (written next to your decisions in the export)<input id="cfgName" type="text" autocomplete="name"></label>
-      <label>Country codes for the name search (comma-separated, empty: whole world)<input id="cfgCC" type="text" placeholder="e.g. it,at,de,hu,cz,ch,fr"></label>
+      <label>Country codes for the name search (comma-separated, empty: whole world)<input id="cfgCC" type="text" autocomplete="off" placeholder="e.g. it,at,de,hu,cz,ch,fr"></label>
+      <p class="hint" id="cfgCCHint" style="margin:-6px 0 0" hidden></p>
+      <p class="err" id="cfgCCErr" style="margin:-6px 0 0" hidden></p>
       <div class="two">
         <label>Match if the nearest place with this name is within (km)<input id="cfgT1" type="number" min="0.5" step="0.5"></label>
         <label>Near if within (km)<input id="cfgT2" type="number" min="1" step="1"></label>
@@ -1724,6 +1727,7 @@ function renderRun(){
     ? `Checking: ${nf.format(checked)} / ${nf.format(withName.length)} places…`
     : `Automatic check: ${nf.format(checked)} / ${nf.format(withName.length)} places · ${nf.format(c.match)} match, ${nf.format(c.near)} near, ${nf.format(c.mismatch)} mismatch, ${nf.format(c.notfound)} name not found`);
   panelSummary("run", RUN.msg || `Auto check ${nf.format(checked)} / ${nf.format(withName.length)} · ${RUN.on ? "running" : checked >= withName.length ? "done" : "paused"}`, !!RUN.msg);
+  $("#runCC").innerHTML = `Name search in: <b>${esc(S.cfg.cc ? S.cfg.cc.split(",").join(", ") : "whole world")}</b> · <button class="linkbtn" type="button" id="runCCEdit">change</button>`;
   $("#btnRun").textContent = RUN.on ? "Pause" : (checked ? (checked < withName.length ? "Continue check" : "All places checked") : "Start automatic check");
   $("#btnRun").disabled = !RUN.on && checked >= withName.length;
   const acc = S.groups.filter(g => verdict(g) === "match" && gStatus(g) === "new").length;
@@ -2860,14 +2864,20 @@ function openSettings(){
   $("#cfgNearby").value = c.nearbyKm; $("#cfgNearby").disabled = !!S.nearLocked;
   $("#cfgLang").value = c.lang; $("#cfgEndpoint").value = c.endpoint; $("#cfgEmail").value = c.email; $("#cfgDelay").value = c.delay;
   const lockMsg = "Set in the project's config.json so that everybody works with the same values.";
-  for (const id of ["#cfgCC","#cfgT1","#cfgT2"]){ $(id).disabled = !!S.cfgLocked; $(id).title = S.cfgLocked ? lockMsg : ""; }
+  for (const id of ["#cfgT1","#cfgT2"]){ $(id).disabled = !!S.cfgLocked; $(id).title = S.cfgLocked ? lockMsg : ""; }
+  const ccH = $("#cfgCCHint"); ccH.hidden = S.ccDefault == null; $("#cfgCCErr").hidden = true;
+  if (S.ccDefault != null) ccH.innerHTML = `Project default: <b>${esc(S.ccDefault || "whole world")}</b>. Your own choice is kept in this browser. <button class="linkbtn" type="button" id="cfgCCReset">Use the default</button>`;
   $("#cfgLang").disabled = !!S.langLocked; $("#cfgLang").title = S.langLocked ? lockMsg : "";
-  $("#cfgName").disabled = G.on; $("#cfgName").title = G.on ? "When working through GitHub, your GitHub login is recorded as the decider." : "";
+  $("#cfgName").closest("label").hidden = G.on;   // through GitHub, the login is recorded as the decider
   $("#dlgSettings").showModal();
 }
 function saveSettings(){
   const prevCC = S.cfg.cc, prevLang = S.cfg.lang, prevT2 = S.cfg.t2;
-  S.cfg = {name:$("#cfgName").value.trim(), cc:$("#cfgCC").value.trim().toLowerCase(), t1:Math.max(0.1, +$("#cfgT1").value || 5), t2:Math.max(0.2, +$("#cfgT2").value || 25), nearbyKm:Math.max(0.1, +$("#cfgNearby").value || 5),
+  const codes = $("#cfgCC").value.toLowerCase().split(/[\s,;]+/).filter(Boolean), bad = codes.filter(x => !/^[a-z]{2}$/.test(x));
+  if (bad.length){ const e = $("#cfgCCErr"); e.textContent = `Not a two-letter country code: ${bad.join(", ")}. Use ISO codes such as it, at, de.`; e.hidden = false; $("#cfgCC").focus(); return; }
+  const cc = [...new Set(codes)].join(",");
+  if (G.on && S.ccDefault != null) LS.set("gj2:cc:" + G.owner + "/" + G.repo, cc === S.ccDefault ? null : cc);
+  S.cfg = {name:$("#cfgName").value.trim(), cc, t1:Math.max(0.1, +$("#cfgT1").value || 5), t2:Math.max(0.2, +$("#cfgT2").value || 25), nearbyKm:Math.max(0.1, +$("#cfgNearby").value || 5),
     lang:$("#cfgLang").value.trim() || DEFAULT_CFG.lang, endpoint:$("#cfgEndpoint").value.trim() || DEFAULT_CFG.endpoint, email:$("#cfgEmail").value.trim(), delay:Math.max(200, +$("#cfgDelay").value || 1100)};
   if (S.cfg.t2 < S.cfg.t1) S.cfg.t2 = S.cfg.t1;
   if (S.cfg.t2 !== prevT2) for (const c of S.clusters) S.clDirty.add(c);
@@ -3270,14 +3280,16 @@ async function startGH(cfg){
   if (!G.owner || !G.repo){ ghStatus("Set the repository in config.json, e.g. \"repo\": \"owner/repository\".", true); return; }
   G.branch = cfg.branch || "main"; G.db = cfg.dataBranch || "annotations";
   const nm = cfg.nominatim || {};
-  if (nm.countrycodes != null) S.cfg.cc = nm.countrycodes;
+  // config.json's country codes are the project default; each annotator may choose their own (Settings)
+  S.ccDefault = nm.countrycodes != null ? String(nm.countrycodes).trim().toLowerCase() : null;
+  if (S.ccDefault != null) S.cfg.cc = LS.get("gj2:cc:" + repo, null) ?? S.ccDefault;
   if (nm.t1) S.cfg.t1 = +nm.t1; if (nm.t2) S.cfg.t2 = +nm.t2;
   if (nm.email && !S.cfg.email) S.cfg.email = nm.email;
   if (nm.endpoint) S.cfg.endpoint = nm.endpoint;
   if (nm.lang) S.cfg.lang = nm.lang;
   if (cfg.nearbyKm) S.cfg.nearbyKm = +cfg.nearbyKm;
   S.nearLocked = !!cfg.nearbyKm;
-  S.cfgLocked = nm.countrycodes != null || !!nm.t1 || !!nm.t2;
+  S.cfgLocked = !!nm.t1 || !!nm.t2;
   const asg = new Map();
   for (const [login, list] of Object.entries(cfg.assignments || {})) for (const cn of list || []){ const k = String(cn).trim(); if (!asg.has(k)) asg.set(k, []); asg.get(k).push(login.toLowerCase()); }
   S.assignByCountry = asg.size ? asg : null; S.mineOn = !!S.assignByCountry;
@@ -3335,6 +3347,8 @@ function wire(){
   $("#btnExport").onclick = () => { $("#expProg").textContent = ""; $("#dlgExport").showModal(); };
   $("#btnSettings").onclick = openSettings;
   $("#cfgSave").onclick = saveSettings;
+  $("#runBody").addEventListener("click", e => { if (e.target.id === "runCCEdit"){ openSettings(); $("#cfgCC").focus(); } });
+  $("#dlgSettings").addEventListener("click", e => { if (e.target.id === "cfgCCReset"){ $("#cfgCC").value = S.ccDefault || ""; $("#cfgCCErr").hidden = true; } });
   $("#clearAuto").onclick = () => { if (!confirm("Delete all automatic check results from this browser? Decisions are kept.")) return; S.auto = new Map(); LS.set("gj2:auto", {}); refreshAll(); toast("Automatic results cleared."); };
   $("#btnMerge").onclick = () => { const i = document.createElement("input"); i.type = "file"; i.accept = ".csv,.tsv,.txt"; i.multiple = true; i.onchange = () => i.files.length && mergeFiles([...i.files]); i.click(); };
   $("#btnRun").onclick = toggleRun; $("#btnAccept").onclick = acceptMatches;
