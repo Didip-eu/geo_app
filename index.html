@@ -1172,8 +1172,11 @@ const STATUS = {
   ok:     {label:"Correct",      v:"--st-ok",     exp:"correct"},
   fixed:  {label:"Corrected",    v:"--st-fixed",  exp:"corrected"},
   unsure: {label:"Uncertain",    v:"--st-unsure", exp:"uncertain"},
+  // no group decision, but every document has its own (never exported: each row has its document decision)
+  docs:   {label:"Decided per document", v:"--st-fixed", exp:"not_decided"},
 };
-const STATUS_FROM_EXP = Object.fromEntries(Object.entries(STATUS).map(([k,v]) => [v.exp, k]));
+// "docs" is derived from the documents' own decisions and never read back from a file
+const STATUS_FROM_EXP = Object.fromEntries(Object.entries(STATUS).filter(([k]) => k !== "docs").map(([k,v]) => [v.exp, k]));
 const AUTO = {
   pending:  {label:"Not checked",      v:"--au-pend",  exp:"not_checked"},
   match:    {label:"Match",            v:"--au-match", exp:"match"},
@@ -1304,7 +1307,7 @@ const S = {
   showAll: LS.get("gj2:showAll", false),
   places:new Map(), placesAll:new Map(), localPlaces:new Map(),
   clusters:[], clDirty:new Set(), grid:null, gridDirty:true,
-  pick:new Map(), gz:{}, gzErr:"", gzCtx:null, nearbySet:null,
+  pick:new Map(), gz:{}, gzErr:"", gzCtx:null, nearbySet:null, docLimit:80, ownCount:new Map(),
   added:new Map(), selMap:new Map(), selecting:false, addQ:"", hlFar:false, pickMk:new Map(), pickFitSig:"", hovKey:null, tokIdx:new Map(), tokGeneric:new Set(),
 };
 
@@ -1354,7 +1357,8 @@ function initMap(){
 
 /* ---------------- effective values ---------------- */
 const gRec = g => S.edits.get(g.key) || null;
-const gStatus = g => gRec(g)?.status || "new";
+const allDocsOwn = g => (S.ownCount.get(g) || 0) >= g.rows.length;
+const gStatus = g => gRec(g)?.status || (allDocsOwn(g) ? "docs" : "new");
 // Effective values of one decision (same rule as merge_decisions.py): a valid gazetteer place
 // reference supplies lat/lon/geonameId/country; a reference to a deleted or unknown place is ignored.
 function resolveRec(e){
@@ -1387,8 +1391,8 @@ function verdict(g){
   return "notfound";
 }
 function markRowsWithOwn(){
-  S.rowsWithOwn = new Set();
-  for (const k of S.edits.keys()) if (k[0] === "r"){ const i = S.idxByKey.get(k); if (i != null) S.rowsWithOwn.add(i); }
+  S.rowsWithOwn = new Set(); S.ownCount = new Map();
+  for (const k of S.edits.keys()) if (k[0] === "r"){ const i = S.idxByKey.get(k); if (i != null && !S.rowsWithOwn.has(i)){ S.rowsWithOwn.add(i); const g = S.rowG[i]; S.ownCount.set(g, (S.ownCount.get(g) || 0) + 1); } }
 }
 function saveEdits(){ const o = {}; for (const [k,v] of S.edits) o[k] = v; if (!LS.set(S.storeKey, o)) toast("The browser could not store your decisions. Export your work now!"); }
 let autoSaveT = 0;
@@ -1615,7 +1619,7 @@ function newPlaceId(){
 }
 function placeUsage(id){
   let groups = 0, docs = 0;
-  for (const [k, e] of S.edits) if (e.place === id && k[0] === "g"){ const g = S.gByKey.get(k); if (g){ groups++; docs += g.rows.length; } }
+  for (const [k, e] of S.edits) if (e.place === id && k[0] === "g"){ const g = S.gByKey.get(k); if (g){ groups++; docs += g.rows.filter(i => !S.rowsWithOwn.has(i) || rPlace(i)?.id === id).length; } }
   return {groups, docs};
 }
 
@@ -1785,7 +1789,7 @@ function panelSummary(k, text, attn){
 }
 function renderFilterSummary(){
   const A = {problem:"Problems", outlier:"Outliers", mismatch:"Mismatch", near:"Near", notfound:"Name not found", nocoord:"No coordinates", match:"Match", pending:"Not checked"};
-  const D = {new:"Not decided", ok:"Correct", fixed:"Corrected", unsure:"Uncertain", conflict:"Conflicts"}, SORT = {count:"by documents", name:"by name", dist:"by deviation"};
+  const D = {new:"Not decided", ok:"Correct", fixed:"Corrected", unsure:"Uncertain", docs:"Per document", conflict:"Conflicts"}, SORT = {count:"by documents", name:"by name", dist:"by deviation"};
   const parts = [S.mineOn && "Mine", S.fd !== "all" && D[S.fd], S.fa !== "all" && A[S.fa], S.inView && "visible map area"].filter(Boolean);
   panelSummary("filt", parts.length ? [...parts, SORT[S.sort]].join(" · ") : S.sort === "count" ? "All" : "All · " + SORT[S.sort], false);
 }
@@ -1806,23 +1810,24 @@ function matchA(g){ return S.fa === "all" || verdict(g) === S.fa || (S.fa === "p
 function matchD(g){ return scopeOk(g) && (S.fd === "all" || (S.fd === "conflict" ? S.conflictGroups.has(g) : gStatus(g) === S.fd)); }
 function renderChips(){
   const ca = {all:S.groups.length, problem:0, outlier:0, mismatch:0, near:0, notfound:0, nocoord:0, match:0, pending:0};
-  const cd = {all:0, new:0, ok:0, fixed:0, unsure:0, conflict:0}; let mine = 0;
+  const cd = {all:0, new:0, ok:0, fixed:0, unsure:0, docs:0, conflict:0}; let mine = 0;
   ca.all = 0;
   for (const g of S.groups){ if (S.assignByCountry && inScope(g)) mine++; if (!scopeOk(g)) continue; ca.all++; cd.all++;
     const v = verdict(g), o = isOutlier(g); ca[v]++; if (o) ca.outlier++; if (PROBLEM.includes(v) || o) ca.problem++; cd[gStatus(g)]++; if (S.conflictGroups.has(g)) cd.conflict++; }
   const A = [["all","All"],["problem","Problems"],["outlier","Outliers"],["mismatch","Mismatch"],["near","Near"],["notfound","Name not found"],["nocoord","No coordinates"],["match","Match"],["pending","Not checked"]];
-  const D = [["all","All"],["new","Not decided"],["ok","Correct"],["fixed","Corrected"],["unsure","Uncertain"],["conflict","Conflicts"]].filter(([k]) => k !== "conflict" || cd.conflict || S.fd === "conflict");
+  const D = [["all","All"],["new","Not decided"],["ok","Correct"],["fixed","Corrected"],["unsure","Uncertain"],["docs","Per document"],["conflict","Conflicts"]].filter(([k]) => (k !== "conflict" && k !== "docs") || cd[k] || S.fd === k);
   $("#chipsA").innerHTML = `<span class="chiplabel">Automatic:</span>` + A.filter(([k]) => k === "all" || ca[k]).map(([k,l]) => `<button type="button" class="chip" data-fa="${k}" aria-pressed="${S.fa===k}">${l} <span class="n">${nf.format(ca[k])}</span></button>`).join("");
   renderFilterSummary();
   $("#chipsD").innerHTML = `<span class="chiplabel">Decision:</span>` + (S.assignByCountry ? `<button type="button" class="chip" data-mine aria-pressed="${S.mineOn}" title="Your countries and the unassigned ones">Mine <span class="n">${nf.format(mine)}</span></button>` : "") + D.map(([k,l]) => `<button type="button" class="chip" data-fd="${k}" aria-pressed="${S.fd===k}">${l} <span class="n">${nf.format(cd[k])}</span></button>`).join("");
 }
 function renderProgress(){
   const t = S.groups.length || 1; let ok=0, fx=0, un=0;
-  for (const g of S.groups){ const s = gStatus(g); if (s==="ok") ok++; else if (s==="fixed") fx++; else if (s==="unsure") un++; }
+  let pd = 0;
+  for (const g of S.groups){ const s = gStatus(g); if (s==="ok") ok++; else if (s==="fixed") fx++; else if (s==="unsure") un++; else if (s==="docs") pd++; }
   const set = (id, n, v) => { const el = $(id); el.style.width = (100*n/t) + "%"; el.style.background = cssVar(v); };
   set("#pb-ok", ok, "--st-ok"); set("#pb-fixed", fx, "--st-fixed"); set("#pb-unsure", un, "--st-unsure");
-  panelSummary("prog", `Decided ${nf.format(ok+fx+un)} / ${nf.format(S.groups.length)}`, false);
-  $("#ptext").textContent = `Decided: ${nf.format(ok+fx+un)} / ${nf.format(S.groups.length)} places · ${nf.format(ok)} correct, ${nf.format(fx)} corrected, ${nf.format(un)} uncertain` + (S.rowsWithOwn.size ? ` · ${nf.format(S.rowsWithOwn.size)} document${S.rowsWithOwn.size === 1 ? "" : "s"} with their own place` : "");
+  panelSummary("prog", `Decided ${nf.format(ok+fx+un+pd)} / ${nf.format(S.groups.length)}`, false);
+  $("#ptext").textContent = `Decided: ${nf.format(ok+fx+un+pd)} / ${nf.format(S.groups.length)} places · ${nf.format(ok)} correct, ${nf.format(fx)} corrected, ${nf.format(un)} uncertain` + (pd ? `, ${nf.format(pd)} per document` : "") + (S.rowsWithOwn.size ? ` · ${nf.format(S.rowsWithOwn.size)} document${S.rowsWithOwn.size === 1 ? "" : "s"} with their own place` : "");
 }
 function devOf(g){ const a = S.auto.get(g.key); return a && a.d != null ? a.d : (verdict(g) === "notfound" ? 1e9 : -1); }
 function computeFiltered(){
@@ -1872,6 +1877,7 @@ function drawData(){
     if (!focus && !(matchA(g) && matchD(g) && (!q || g.search.includes(q)))) continue;
     const p = gPos(g); if (!p) continue;
     const v = verdict(g), s = gStatus(g);
+    if (s === "docs") continue;   // every document has its own place: nothing remains at this position
     const r = Math.max(5, Math.min(14, 3.5 + Math.sqrt(g.rows.length) * 1.4));
     const decided = s !== "new";
     const m = L.circleMarker([p.lat, p.lon], focus && S.nearbySet && S.nearbySet.has(g)
@@ -1965,7 +1971,7 @@ function fitSel(){
 }
 function zoomToSel(){ const p = S.pending || selPos(); if (p) flyTo(p, 13); }
 function selectGroup(g, fly=true){
-  S.sel = {kind:"group", g}; S.pending = null; S.coordErr = ""; S.draftGid = null; S.gidErr = ""; S.pick = new Map(); S.gz = {}; S.gzErr = ""; S.added = new Map(); S.selMap = new Map(); S.addQ = ""; S.hlFar = false; S.pickFitSig = ""; S.gzCtx = null; S.override = false; S.rowOverride = new Set(); S.noteErr = ""; S.draftNote = gRec(g)?.note || ""; setPlacing(false);
+  S.sel = {kind:"group", g}; S.pending = null; S.coordErr = ""; S.draftGid = null; S.gidErr = ""; S.draftCo = null; S.coTouched = false; S.pick = new Map(); S.gz = {}; S.gzErr = ""; S.added = new Map(); S.selMap = new Map(); S.addQ = ""; S.hlFar = false; S.pickFitSig = ""; S.gzCtx = null; S.override = false; S.rowOverride = new Set(); S.noteErr = ""; S.docLimit = 80; S.draftNote = gRec(g)?.note || ""; setPlacing(false);
   openDetail(); renderDetail(); drawSel(); drawDataSoon();
   if (fly) fitSel();
   markListCurrent();
@@ -1973,7 +1979,7 @@ function selectGroup(g, fly=true){
 }
 function selectRow(i, fly=true){
   if (S.selecting) setSelecting(false);
-  S.sel = {kind:"row", idx:i, g:S.rowG[i]}; S.pending = null; S.coordErr = ""; S.draftGid = null; S.gidErr = ""; S.pick = new Map(); S.gz = {}; S.gzErr = ""; S.added = new Map(); S.selMap = new Map(); S.addQ = ""; S.hlFar = false; S.pickFitSig = ""; S.gzCtx = null; S.override = false; S.rowOverride = new Set(); S.noteErr = ""; S.draftNote = rRec(i)?.note || ""; setPlacing(false);
+  S.sel = {kind:"row", idx:i, g:S.rowG[i]}; S.pending = null; S.coordErr = ""; S.draftGid = null; S.gidErr = ""; S.draftCo = null; S.coTouched = false; S.pick = new Map(); S.gz = {}; S.gzErr = ""; S.added = new Map(); S.selMap = new Map(); S.addQ = ""; S.hlFar = false; S.pickFitSig = ""; S.gzCtx = null; S.override = false; S.rowOverride = new Set(); S.noteErr = ""; S.docLimit = 80; S.draftNote = rRec(i)?.note || ""; setPlacing(false);
   openDetail(); renderDetail(); drawSel(); drawDataSoon();
   if (fly) fitSel();
   markListCurrent();
@@ -1993,7 +1999,7 @@ function setPlacing(on){
   const b = $("#btnPlace"); if (b) b.setAttribute("aria-pressed", S.placing);
 }
 function setPending(p, noFly){
-  S.pending = p; S.coordErr = ""; renderDetail(); drawSel();
+  S.pending = p; S.coordErr = ""; if (!S.coTouched) S.draftCo = null; renderDetail(); drawSel();
   if (!noFly && p && !map.getBounds().contains([p.lat, p.lon])) flyTo(p, map.getZoom());
 }
 
@@ -2443,6 +2449,7 @@ function renderDetail(){
       ...(/^\d+$/.test(currentVal("geonameId")) ? [A_(gnUrl(currentVal("geonameId")), "GeoNames")] : []),
       ...(shown ? [A_(`https://www.openstreetmap.org/?mlat=${shown.lat.toFixed(5)}&mlon=${shown.lon.toFixed(5)}#map=13/${shown.lat.toFixed(5)}/${shown.lon.toFixed(5)}`, "OSM at the point")] : [])].join("")}</div>
     <p class="d-kicker">${isRow ? `Single document · place of issue: ${esc(g.name)}` : `${nf.format(g.rows.length)} documents with this place name and coordinates`}</p>
+    ${!isRow && S.ownCount.get(g) ? `<p class="d-kicker" style="margin-top:4px">${allDocsOwn(g) ? `All ${nf.format(g.rows.length)} documents have their own decision, so nothing remains at this position; the group needs no decision of its own.` : `${nf.format(S.ownCount.get(g))} of ${nf.format(g.rows.length)} documents have their own decision.`}</p>` : ""}
     <div class="d-tools"><button class="btn small" type="button" id="btnZoomSel">Zoom to place</button>
       <label class="auto"><input type="checkbox" id="showAll" ${S.showAll ? "checked" : ""}> Show all points</label></div>
     <p class="d-kicker" style="margin-top:6px"><span class="pill"><i style="background:${cssVar(STATUS[status].v)}"></i>${STATUS[status].label}</span>${isRow && !own ? " (inherited from the place)" : ""}${rec && rec.at ? ` · ${rec.by ? esc(rec.by) + ", " : ""}${df.format(new Date(rec.at))}` : ""}</p>
@@ -2495,6 +2502,9 @@ function renderDetail(){
       <input id="gidIn" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 2761369" value="${esc(gidVal)}">
       <a id="gidLink" href="${/^\d+$/.test(gidVal) ? gnUrl(gidVal) : "https://www.geonames.org/"}" target="_blank" rel="noopener" style="font-size:.875rem;white-space:nowrap">geonames.org</a></div>
     ${S.gidErr ? `<p class="err" style="margin:-4px 0 8px">${esc(S.gidErr)}</p>` : ""}
+    <div class="cin" style="margin:0 0 10px;align-items:center"><label for="coIn" style="font-size:.875rem;white-space:nowrap">Country</label>
+      <input id="coIn" type="text" autocomplete="off" placeholder="e.g. Austria" value="${esc(S.draftCo ?? currentVal("country"))}"></div>
+    <p class="hint" id="coHint" style="margin:-4px 0 8px" hidden></p>
     <label class="sr" for="noteIn">Note</label>
     <textarea id="noteIn" placeholder="${locked || S.override ? "Note (required for an override): why do you change this decision?" : "Note (optional): source, reasoning, question"}">${esc(S.draftNote)}</textarea>
     ${S.noteErr ? `<p class="err" style="margin:4px 0 0">${esc(S.noteErr)}</p>` : ""}
@@ -2502,7 +2512,7 @@ function renderDetail(){
       ${changed ? `<button class="btn primary" type="button" data-act="fixed" ${locked ? "disabled" : ""}>Save new position</button>` : ""}
       ${orig ? `<button class="btn${changed ? "" : " primary"}" type="button" data-act="ok" ${locked ? "disabled" : ""}>Name and coordinates match</button>` : ""}
       <button class="btn" type="button" data-act="unsure" ${locked ? "disabled" : ""}>Uncertain</button>
-      ${rec ? `<button class="btn" type="button" data-act="note" ${locked ? "disabled" : ""}>Save note only</button>` : ""}
+      ${rec ? `<button class="btn" type="button" data-act="note" ${locked ? "disabled" : ""}>Save note, ID, country</button>` : ""}
       ${rec ? `<button class="btn danger" type="button" data-act="reset" ${locked ? "disabled" : ""}>${isRow ? "Follow the place again" : "Clear decision"}</button>` : ""}
     </div>
     ${locked ? `<p class="hint">Decided by ${esc(lock.by)}: click “Override” at the top to change it.</p>` : ""}
@@ -2534,10 +2544,12 @@ function renderDetail(){
   if (isRow) html += `<div class="sect"><h3>Document</h3><ul class="docs">${docRow(S.sel.idx)}</ul><p class="hint">A decision saved here applies to this document only.</p></div>`;
   else html += `<div class="sect"><h3>Documents (${nf.format(g.rows.length)})</h3>
     <p class="hint" style="margin:0 0 8px">The decision applies to all ${nf.format(g.rows.length)} documents. If a document was issued elsewhere, give it its own place.</p>
-    <ul class="docs">${g.rows.slice(0, 80).map(docRow).join("")}</ul>${g.rows.length > 80 ? `<p class="hint">${nf.format(g.rows.length - 80)} more documents in the export.</p>` : ""}</div>`;
+    <ul class="docs">${g.rows.slice(0, S.docLimit).map(docRow).join("")}</ul>${g.rows.length > S.docLimit ? `<p class="hint" style="margin:8px 0 4px">Showing ${nf.format(Math.min(S.docLimit, g.rows.length))} of ${nf.format(g.rows.length)} documents.</p>
+      <div class="acts" style="margin-top:0"><button class="btn small" type="button" data-moredocs="250">Show ${nf.format(Math.min(250, g.rows.length - S.docLimit))} more</button>${g.rows.length <= 5000 ? `<button class="btn small" type="button" data-moredocs="all">Show all ${nf.format(g.rows.length)}</button>` : `<span class="hint">For all ${nf.format(g.rows.length)}, use Export.</span>`}</div>` : ""}</div>`;
 
   box.innerHTML = html;
   box.classList.toggle("hlfar", !!S.hlFar);
+  if (shown && (moved || !orig) && (S.pending || (rec && !resolveRec(rec)?.place))) checkCountry(shown);
   if (S.addQ) renderAddResults();
   if (focusId && document.getElementById(focusId) && focusId !== "dBack"){
     const el = document.getElementById(focusId); el.focus();
@@ -2557,22 +2569,63 @@ function act(kind){
   const gidIn = ($("#gidIn")?.value ?? "").trim();
   if (kind !== "reset" && gidIn && !/^\d{1,10}$/.test(gidIn)){ S.gidErr = "A GeoNames ID is a whole number, e.g. 2761369."; S.draftGid = gidIn; S.draftNote = note; renderDetail(); return; }
   const cur = selRec();
-  // Only a value that differs from the inherited one is stored; "" means "cleared".
+  // Only a value that differs from the inherited one is stored; "" means "cleared". A gazetteer place brings its own country.
   const gid = gidIn === inheritedVal("geonameId") ? null : gidIn;
-  const base = {note, by:myName(), at:new Date().toISOString(), geonameId:gid, country:cur?.country ?? null};
+  const coIn = ($("#coIn")?.value ?? "").trim();
+  const co = kind === "note" && resolveRec(cur)?.place ? cur.country ?? null : coIn === inheritedVal("country") ? null : coIn;
+  const base = {note, by:myName(), at:new Date().toISOString(), geonameId:gid, country:co};
+  const late = kind === "fixed" && !S.coTouched && S.coWait && S.coWait.pend === S.pending ? S.coWait.p : null, coInh = inheritedVal("country");
   let rec;
   if (kind === "fixed"){ if (!S.pending) return; rec = {...base, status:"fixed", lat:round6(S.pending.lat), lon:round6(S.pending.lon)}; }
   else if (kind === "ok") rec = {...base, status:"ok", lat:null, lon:null};
   else if (kind === "unsure"){ const p = S.pending || (cur && cur.lat != null ? cur : null); rec = {...base, status:"unsure", lat:p ? round6(p.lat) : null, lon:p ? round6(p.lon) : null}; }
-  else if (kind === "note"){ if (!cur) return; rec = {...cur, note, geonameId:gid, by:base.by || cur.by, at:base.at}; }
+  else if (kind === "note"){ if (!cur) return; rec = {...cur, note, geonameId:gid, country:co, by:base.by || cur.by, at:base.at}; }
   else if (kind === "reset") rec = null;
   const wasGroup = S.sel.kind === "group" ? S.sel.g : null;
   const prevIdx = wasGroup ? S.filtered.indexOf(wasGroup) : -1;
-  S.pending = null; setPlacing(false); S.draftNote = rec ? rec.note : ""; S.draftGid = null; S.gidErr = "";
+  S.pending = null; setPlacing(false); S.draftNote = rec ? rec.note : ""; S.draftGid = null; S.gidErr = ""; S.draftCo = null; S.coTouched = false;
   S.noteErr = ""; S.override = false;
   withAction(lock ? "override" : "decide", () => setEdit(key, rec)); refreshAll();
-  toast(kind === "reset" ? "Decision cleared." : kind === "note" ? "Note saved." : "Saved: " + STATUS[rec.status].label.toLowerCase() + ".");
+  if (late && rec.country == null) fillCountryLater(key, rec.at, late, coInh);
+  toast(kind === "reset" ? "Decision cleared." : kind === "note" ? "Saved." : "Saved: " + STATUS[rec.status].label.toLowerCase() + ".");
   if (wasGroup && S.autoNext && kind !== "note" && kind !== "reset") goNext(wasGroup, prevIdx);
+}
+/* Country at a position: OSM reverse geocoding with English names (as in the source), cached per position.
+   A new position fills the Country field (unless the annotator typed one); a saved one gets a hint with a button.
+   A position saved before its lookup finished gets the country afterwards (fillCountryLater). */
+const COUNTRY_AT = new Map();
+function countryAt(p){
+  const k = p.lat.toFixed(4) + "," + p.lon.toFixed(4);
+  if (!COUNTRY_AT.has(k)) COUNTRY_AT.set(k, nomi("reverse", {lat:p.lat, lon:p.lon, format:"jsonv2", zoom:3, addressdetails:1, "accept-language":"en"})
+    .then(r => (r && !r.error && r.address && r.address.country) || null).catch(() => { COUNTRY_AT.delete(k); return null; }));
+  return COUNTRY_AT.get(k);
+}
+function checkCountry(pos){
+  const sel = S.sel, pend = S.pending, w = {pend};
+  S.coWait = w; w.p = countryAt(pos).then(co => {
+    if (S.coWait === w) S.coWait = null;
+    const inp = $("#coIn"), hint = $("#coHint");
+    if (S.sel === sel && S.pending === pend && co && inp && hint){
+      if (pend && !S.coTouched){ if (inp.value.trim() !== co){ inp.value = co; S.draftCo = co; } hint.textContent = `Filled in from OpenStreetMap: the new position is in ${co}.`; hint.hidden = false; }
+      else if (inp.value.trim() !== co){ hint.innerHTML = `OpenStreetMap: this position is in <b>${esc(co)}</b>. <button class="btn small" type="button" data-useco="${esc(co)}">${pend ? "Use" : "Set country to"} ${esc(co)}</button>`; hint.hidden = false; }
+      else hint.hidden = true;
+    }
+    return co;   // also when the view changed: fillCountryLater needs it
+  });
+}
+// completes the saved decision itself (no new log entry), unless it was changed or given a country meanwhile
+function fillCountryLater(key, at, p, inherited){
+  p.then(co => {
+    if (!co || co === inherited) return;
+    const r = (G.on ? G.mine : S.edits).get(key);
+    if (!r || r.at !== at || r.country != null) return;
+    r.country = co;
+    const log = G.on ? G.myLog : S.localLog.e, e = [...log].reverse().find(x => x.key === key);
+    if (e && e.after && e.after.at === at) e.after.country = co;
+    if (G.on) markDirty(G.dirtyE, key);
+    endBatch();
+    if (S.sel && selKey() === key && !S.pending) renderDetail();
+  });
 }
 function goNext(from, prevIdx){
   computeFiltered();
@@ -2753,6 +2806,7 @@ async function mergeFiles(files){
 // Export rule (same as merge_decisions.py): a decided row gets the decided coordinates / geonameId / country
 // in its native columns and checked.by/when/notes; the source values go to review_original_*.
 // An uncertain row keeps its source values; the proposal goes to review_proposed_*. Undecided rows are unchanged.
+// review_auto_* describe the source position; they are empty when a decision moved the row.
 function doExport(){
   const scope = document.querySelector('input[name="expScope"]:checked').value;
   const m = S.meta.map, width = S.meta.columns.length;
@@ -2765,7 +2819,7 @@ function doExport(){
     const r = [...S.rows[i], ...added.map(() => "")];
     const orig = [r[m.lat], r[m.lon], r[ix.geonameId], r[ix.country]];
     const rv = resolveRec(rr), gv = resolveRec(gr), place = placeOf(rv, gv);
-    let proposed = ["", "", ""];
+    let proposed = ["", "", ""], moved = false;
     if (rec){
       const src = rv && rv.lat != null ? rv : gv && gv.lat != null ? gv : null;
       const val = f => rv && rv[f] != null ? rv[f] : gv && gv[f] != null ? gv[f] : null;
@@ -2773,15 +2827,16 @@ function doExport(){
         // Uncertain: the source values stay; the proposal goes to review_proposed_*.
         proposed = [src ? src.lat : "", src ? src.lon : "", val("geonameId") ?? ""];
       } else {
-        if (src){ r[m.lat] = src.lat; r[m.lon] = src.lon; }
+        if (src){ r[m.lat] = src.lat; r[m.lon] = src.lon; moved = num(r[m.lat]) !== num(orig[0]) || num(r[m.lon]) !== num(orig[1]); }
         for (const f of ["geonameId","country"]){ const v = val(f); if (v != null) r[ix[f]] = v; }
       }
       r[ix.checkedBy] = rec.by || ""; r[ix.checkedWhen] = (rec.at || "").slice(0, 10); r[ix.checkedNotes] = rec.note || "";
     }
+    // the automatic check describes the source position, so it is left out when a decision moved the row
     const a = S.auto.get(g.key), c = a && a.c[0];
     out.push([...r, STATUS[rStatus(i)].exp, rr ? LEVEL.doc : gr ? LEVEL.place : "", place ? place.id : "", place ? place.name || "" : "",
       ...(rec ? orig : ["", "", "", ""]), ...proposed,
-      AUTO[verdict(g)].exp, a && a.d != null ? a.d : "", c ? c.x : "", c ? c.lat : "", c ? c.lon : "", a ? a.rv : ""]);
+      ...(moved ? ["", "", "", "", "", ""] : [AUTO[verdict(g)].exp, a && a.d != null ? a.d : "", c ? c.x : "", c ? c.lat : "", c ? c.lon : "", a ? a.rv : ""])]);
   }
   if (out.length === 1){ $("#expProg").textContent = "No row has a decision yet."; return; }
   const delim = S.meta.delimiter || ",", tsv = delim === "\t";
@@ -2834,6 +2889,8 @@ const G = {on:false, cfg:null, owner:"", repo:"", branch:"main", db:"annotations
 const GH_API = "https://api.github.com";
 // The decider: the GitHub login in GitHub mode, the name from Settings in local mode.
 function myName(){ return G.on ? G.login || "" : S.cfg.name || ""; }
+// Record identity written next to each decision; merge_decisions.py matches on it:
+// places by {n, la, lo} (name + parsed coordinates), documents by {id} or, without an ID column, {ix} (row index).
 // Record identity written next to each decision; merge_decisions.py matches on it:
 // places by {n, la, lo} (name + parsed coordinates), documents by {id} or, without an ID column, {ix} (row index).
 function identFor(key){
@@ -3289,6 +3346,7 @@ function wire(){
     if (t.id === "btnPlace"){ setPlacing(!S.placing); return; }
     if (t.id === "btnZoomSel"){ zoomToSel(); return; }
     if (t.id === "gzConfirm"){ confirmPlace(); return; }
+    const md = t.closest("[data-moredocs]"); if (md){ const st = $("#detail").scrollTop; S.docLimit = md.dataset.moredocs === "all" ? Infinity : S.docLimit + 250; renderDetail(); $("#detail").scrollTop = st; return; }
     if (t.id === "btnOverride"){ S.override = true; S.draftNote = ""; renderDetail(); const n = $("#noteIn"); if (n) n.focus(); return; }   // the override needs the annotator's own note
     const rov = t.closest("[data-rowov]"); if (rov){ S.rowOverride.add(rov.dataset.rowov); renderDetail(); drawSel(); return; }
     const rv = t.closest("[data-revert]"); if (rv){ revertTo(rv.dataset.revert); return; }
@@ -3300,10 +3358,11 @@ function wire(){
     if (ad){ const h = S.gByKey.get(ad.dataset.add); if (h){ S.added.set(h.key, h); S.pick.set(h.key, true); renderDetail(); drawSel(); const i = $("#gzAdd"); if (i) i.focus(); } return; }
     if (t.id === "gzLookup"){ lookupGid(); return; }
     if (t.id === "btnPlaceSettings"){ openPlaceSettings(); return; }
-    if (t.id === "btnDiscard"){ S.pending = null; S.coordErr = ""; renderDetail(); drawSel(); return; }
+    if (t.id === "btnDiscard"){ S.pending = null; S.coordErr = ""; S.draftCo = null; S.coTouched = false; renderDetail(); drawSel(); return; }
     if (t.id === "coordGo"){ applyCoordInput(); return; }
     if (t.id === "btnRecheck"){ const g = S.sel.g; t.disabled = true; t.textContent = "Checking…"; S.auto.delete(g.key); checkOne(g).then(() => { if (S.sel && S.sel.g === g) fitSel(); }); return; }
     const a = t.closest("[data-act]"); if (a){ act(a.dataset.act); return; }
+    const uc = t.closest("[data-useco]"); if (uc){ $("#coIn").value = S.draftCo = uc.dataset.useco; S.coTouched = true; if (S.pending) { $("#coHint").hidden = true; } else act("note"); return; }
     const tk = t.closest("[data-take]"); if (tk){ const [la, lo] = tk.dataset.take.split(",").map(Number); setPending({lat:la, lon:lo}, true); flyTo({lat:la, lon:lo}, 11); return; }
     const j = t.closest("[data-jump]"); if (j){ const g = S.gByKey.get(j.dataset.jump); if (g) selectGroup(g); return; }
     const r = t.closest("[data-row]"); if (r){ selectRow(+r.dataset.row); return; }
@@ -3315,6 +3374,7 @@ function wire(){
     if (e.target.id === "gzName"){ clearTimeout(S.relT); S.relT = setTimeout(updateRelated, 400); }
     if (e.target.id === "gzName" || e.target.id === "gzCountry") S.gz = {...S.gz, for:forT, [e.target.id === "gzName" ? "name" : "country"]: e.target.value};
     if (e.target.id === "gzGid"){ const v = e.target.value.trim(); S.gz = {...S.gz, for:forT, gid:e.target.value}; $("#gzGidLink").href = /^\d+$/.test(v) ? gnUrl(v) : "https://www.geonames.org/"; }
+    if (e.target.id === "coIn"){ S.draftCo = e.target.value; S.coTouched = true; }
     if (e.target.id === "gidIn"){ const v = e.target.value.trim(); S.draftGid = e.target.value; $("#gidLink").href = /^\d+$/.test(v) ? gnUrl(v) : "https://www.geonames.org/"; e.target.setAttribute("aria-invalid", v && !/^\d{1,10}$/.test(v) ? "true" : "false"); }
   });
   det.addEventListener("change", e => {
