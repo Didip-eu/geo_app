@@ -654,7 +654,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   --bg:#F5F6F4; --panel:#FFFFFF; --ink:#1C2B36; --muted:#5B6873; --line:#D8DDE1; --soft:#EEF1F2;
   --accent:#1F4E6E; --accent-ink:#FFFFFF;
   --sea:#C8D8DF; --land:#EEF0EA; --coast:#8F9BA4; --border:#6F7C86; --adm1:#C0C7CC; --river:#9FBBC7; --label:#46535C; --halo:#EEF0EA;
-  --st-new:#2F6690; --st-ok:#3C7A5A; --st-fixed:#7B4FA3; --st-unsure:#C2185B; --warn:#A8620A;
+  --st-new:#2F6690; --st-ok:#3C7A5A; --st-fixed:#7B4FA3; --st-unsure:#C2185B; --st-none:#5F6B73; --warn:#A8620A;
   --mark:#C2185B;
   --font:"Atkinson Hyperlegible", "Segoe UI", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   color-scheme: light;
@@ -664,7 +664,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     --bg:#11171B; --panel:#172026; --ink:#E3E9ED; --muted:#95A3AD; --line:#2B3740; --soft:#1D2830;
     --accent:#7FB3D5; --accent-ink:#0E1A22;
     --sea:#0E222C; --land:#1C262C; --coast:#51606A; --border:#71808A; --adm1:#2E3B43; --river:#1E4454; --label:#A9B6BE; --halo:#1C262C;
-    --st-new:#6FA8DC; --st-ok:#6DBF94; --st-fixed:#B993DE; --st-unsure:#F06292; --warn:#E0A04A;
+    --st-new:#6FA8DC; --st-ok:#6DBF94; --st-fixed:#B993DE; --st-unsure:#F06292; --st-none:#A7B0B6; --warn:#E0A04A;
     --mark:#F06292;
     color-scheme: dark;
   }
@@ -673,7 +673,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   --bg:#11171B; --panel:#172026; --ink:#E3E9ED; --muted:#95A3AD; --line:#2B3740; --soft:#1D2830;
   --accent:#7FB3D5; --accent-ink:#0E1A22;
   --sea:#0E222C; --land:#1C262C; --coast:#51606A; --border:#71808A; --adm1:#2E3B43; --river:#1E4454; --label:#A9B6BE; --halo:#1C262C;
-  --st-new:#6FA8DC; --st-ok:#6DBF94; --st-fixed:#B993DE; --st-unsure:#F06292; --warn:#E0A04A;
+  --st-new:#6FA8DC; --st-ok:#6DBF94; --st-fixed:#B993DE; --st-unsure:#F06292; --st-none:#A7B0B6; --warn:#E0A04A;
   --mark:#F06292;
   color-scheme: dark;
 }
@@ -981,7 +981,7 @@ dialog::backdrop{ background:rgba(10,20,28,.45); }
       </section>
       <section class="pnl" id="progress" data-panel="prog" hidden>
         <button class="pnl-h" type="button" aria-expanded="false" aria-controls="progBody"><span class="chev" aria-hidden="true"></span><span class="pnl-t">Progress</span><span class="pnl-s" id="progSum"></span></button>
-        <div class="bar pnl-bar" aria-hidden="true"><span id="pb-ok"></span><span id="pb-fixed"></span><span id="pb-unsure"></span></div>
+        <div class="bar pnl-bar" aria-hidden="true"><span id="pb-ok"></span><span id="pb-fixed"></span><span id="pb-unsure"></span><span id="pb-none"></span></div>
         <div class="pnl-b" id="progBody"><p id="ptext"></p></div>
       </section>
     </header>
@@ -1175,6 +1175,8 @@ const STATUS = {
   ok:     {label:"Correct",      v:"--st-ok",     exp:"correct"},
   fixed:  {label:"Corrected",    v:"--st-fixed",  exp:"corrected"},
   unsure: {label:"Uncertain",    v:"--st-unsure", exp:"uncertain"},
+  // the charter names no place of issue (sine loco, b. m., o. O.): no coordinates, no GeoNames ID
+  none:   {label:"No place of issue", v:"--st-none", exp:"no_place"},
   // no group decision, but every document has its own (never exported: each row has its document decision)
   docs:   {label:"Decided per document", v:"--st-fixed", exp:"not_decided"},
 };
@@ -1369,13 +1371,13 @@ function resolveRec(e){
   if (e.place){ const p = S.places.get(e.place); if (p && p.lat != null) return {lat:p.lat, lon:p.lon, geonameId:p.geonameId || null, country:p.country || null, place:p}; }
   return {lat:e.lat ?? null, lon:e.lon ?? null, geonameId:e.geonameId ?? null, country:e.country ?? null, place:null, missing:e.place || null};
 }
-function gPos(g){ const e = resolveRec(gRec(g)); if (e && e.lat != null) return {lat:e.lat, lon:e.lon}; return g.lat != null ? {lat:g.lat, lon:g.lon} : null; }
+function gPos(g){ if (gRec(g)?.status === "none") return null; const e = resolveRec(gRec(g)); if (e && e.lat != null) return {lat:e.lat, lon:e.lon}; return g.lat != null ? {lat:g.lat, lon:g.lon} : null; }
 const rRec = i => S.edits.get(S.rowKeys[i]) || null;
-function rPos(i){ const e = resolveRec(rRec(i)); if (e && e.lat != null) return {lat:e.lat, lon:e.lon}; return gPos(S.rowG[i]); }
+function rPos(i){ if (rRec(i)?.status === "none") return null; const e = resolveRec(rRec(i)); if (e && e.lat != null) return {lat:e.lat, lon:e.lon}; return gPos(S.rowG[i]); }
 // The place a row belongs to: a document decision overrides its group's; a document moved by its own decision leaves the place.
 function placeOf(rv, gv){ return rv ? (rv.place || (rv.lat != null ? null : gv?.place || null)) : (gv?.place || null); }
 const gPlace = g => resolveRec(gRec(g))?.place || null;
-const rPlace = i => placeOf(resolveRec(rRec(i)), resolveRec(gRec(S.rowG[i])));
+const rPlace = i => rRec(i)?.status === "none" ? null : placeOf(resolveRec(rRec(i)), resolveRec(gRec(S.rowG[i])));
 const rStatus = i => rRec(i)?.status || gStatus(S.rowG[i]);
 function selKey(){ return !S.sel ? null : S.sel.kind === "group" ? S.sel.g.key : S.rowKeys[S.sel.idx]; }
 function selRec(){ const k = selKey(); return k ? S.edits.get(k) || null : null; }
@@ -1856,25 +1858,25 @@ function matchA(g){ return S.fa === "all" || verdict(g) === S.fa || (S.fa === "p
 function matchD(g){ return scopeOk(g) && (S.fd === "all" || (S.fd === "conflict" ? S.conflictGroups.has(g) : gStatus(g) === S.fd)); }
 function renderChips(){
   const ca = {all:S.groups.length, problem:0, outlier:0, mismatch:0, near:0, notfound:0, nocoord:0, match:0, pending:0};
-  const cd = {all:0, new:0, ok:0, fixed:0, unsure:0, docs:0, conflict:0}; let mine = 0;
+  const cd = {all:0, new:0, ok:0, fixed:0, unsure:0, none:0, docs:0, conflict:0}; let mine = 0;
   ca.all = 0;
   const my = myCodes(); let myN = 0;
   for (const g of S.groups){ if (S.assignByCountry && inScope(g)) mine++; if (my.length && inMyCountries(g)) myN++; if (!scopeOk(g)) continue; ca.all++; cd.all++;
     const v = verdict(g), o = isOutlier(g); ca[v]++; if (o) ca.outlier++; if (PROBLEM.includes(v) || o) ca.problem++; cd[gStatus(g)]++; if (S.conflictGroups.has(g)) cd.conflict++; }
   const A = [["all","All"],["problem","Problems"],["outlier","Outliers"],["mismatch","Mismatch"],["near","Near"],["notfound","Name not found"],["nocoord","No coordinates"],["match","Match"],["pending","Not checked"]];
-  const D = [["all","All"],["new","Not decided"],["ok","Correct"],["fixed","Corrected"],["unsure","Uncertain"],["docs","Per document"],["conflict","Conflicts"]].filter(([k]) => (k !== "conflict" && k !== "docs") || cd[k] || S.fd === k);
+  const D = [["all","All"],["new","Not decided"],["ok","Correct"],["fixed","Corrected"],["unsure","Uncertain"],["none","No place"],["docs","Per document"],["conflict","Conflicts"]].filter(([k]) => !["conflict","docs","none"].includes(k) || cd[k] || S.fd === k);
   $("#chipsA").innerHTML = `<span class="chiplabel">Automatic:</span>` + A.filter(([k]) => k === "all" || ca[k]).map(([k,l]) => `<button type="button" class="chip" data-fa="${k}" aria-pressed="${S.fa===k}">${l} <span class="n">${nf.format(ca[k])}</span></button>`).join("");
   renderFilterSummary();
   $("#chipsD").innerHTML = `<span class="chiplabel">Decision:</span>` + (my.length ? `<button type="button" class="chip" data-mycc aria-pressed="${S.myOn}" title="Places whose source country is one of your country codes (Settings)">My countries: ${esc(my.join(", "))} <span class="n">${nf.format(myN)}</span></button>` : "") + (S.assignByCountry ? `<button type="button" class="chip" data-mine aria-pressed="${S.mineOn}" title="Your countries and the unassigned ones">Mine <span class="n">${nf.format(mine)}</span></button>` : "") + D.map(([k,l]) => `<button type="button" class="chip" data-fd="${k}" aria-pressed="${S.fd===k}">${l} <span class="n">${nf.format(cd[k])}</span></button>`).join("");
 }
 function renderProgress(){
   const t = S.groups.length || 1; let ok=0, fx=0, un=0;
-  let pd = 0;
-  for (const g of S.groups){ const s = gStatus(g); if (s==="ok") ok++; else if (s==="fixed") fx++; else if (s==="unsure") un++; else if (s==="docs") pd++; }
+  let pd = 0, np = 0;
+  for (const g of S.groups){ const s = gStatus(g); if (s==="ok") ok++; else if (s==="fixed") fx++; else if (s==="unsure") un++; else if (s==="docs") pd++; else if (s==="none") np++; }
   const set = (id, n, v) => { const el = $(id); el.style.width = (100*n/t) + "%"; el.style.background = cssVar(v); };
-  set("#pb-ok", ok, "--st-ok"); set("#pb-fixed", fx, "--st-fixed"); set("#pb-unsure", un, "--st-unsure");
-  panelSummary("prog", `Decided ${nf.format(ok+fx+un+pd)} / ${nf.format(S.groups.length)}`, false);
-  $("#ptext").textContent = `Decided: ${nf.format(ok+fx+un+pd)} / ${nf.format(S.groups.length)} places · ${nf.format(ok)} correct, ${nf.format(fx)} corrected, ${nf.format(un)} uncertain` + (pd ? `, ${nf.format(pd)} per document` : "") + (S.rowsWithOwn.size ? ` · ${nf.format(S.rowsWithOwn.size)} document${S.rowsWithOwn.size === 1 ? "" : "s"} with their own place` : "");
+  set("#pb-ok", ok, "--st-ok"); set("#pb-fixed", fx, "--st-fixed"); set("#pb-unsure", un, "--st-unsure"); set("#pb-none", np, "--st-none");
+  panelSummary("prog", `Decided ${nf.format(ok+fx+un+pd+np)} / ${nf.format(S.groups.length)}`, false);
+  $("#ptext").textContent = `Decided: ${nf.format(ok+fx+un+pd+np)} / ${nf.format(S.groups.length)} places · ${nf.format(ok)} correct, ${nf.format(fx)} corrected, ${nf.format(un)} uncertain` + (np ? `, ${nf.format(np)} without a place` : "") + (pd ? `, ${nf.format(pd)} per document` : "") + (S.rowsWithOwn.size ? ` · ${nf.format(S.rowsWithOwn.size)} document${S.rowsWithOwn.size === 1 ? "" : "s"} with their own place` : "");
 }
 function devOf(g){ const a = S.auto.get(g.key); return a && a.d != null ? a.d : (verdict(g) === "notfound" ? 1e9 : -1); }
 function computeFiltered(){
@@ -2563,6 +2565,7 @@ function renderDetail(){
       ${changed ? `<button class="btn primary" type="button" data-act="fixed" ${locked ? "disabled" : ""}>Save new position</button>` : ""}
       ${orig ? `<button class="btn${changed ? "" : " primary"}" type="button" data-act="ok" ${locked ? "disabled" : ""}>Name and coordinates match</button>` : ""}
       <button class="btn" type="button" data-act="unsure" ${locked ? "disabled" : ""}>Uncertain</button>
+      <button class="btn" type="button" data-act="none" ${locked ? "disabled" : ""} title="The charter names no place of issue (sine loco, b. m., o. O.): its coordinates and GeoNames ID are emptied; the country stays unless you change it in the Country field">No place of issue</button>
       ${rec ? `<button class="btn" type="button" data-act="note" ${locked ? "disabled" : ""}>Save note, ID, country</button>` : ""}
       ${rec ? `<button class="btn danger" type="button" data-act="reset" ${locked ? "disabled" : ""}>${isRow ? "Follow the place again" : "Clear decision"}</button>` : ""}
     </div>
@@ -2629,6 +2632,7 @@ function act(kind){
   let rec;
   if (kind === "fixed"){ if (!S.pending) return; rec = {...base, status:"fixed", lat:round6(S.pending.lat), lon:round6(S.pending.lon)}; }
   else if (kind === "ok") rec = {...base, status:"ok", lat:null, lon:null};
+  else if (kind === "none") rec = {...base, status:"none", lat:null, lon:null, geonameId:null};   // a country typed in the field is kept
   else if (kind === "unsure"){ const p = S.pending || (cur && cur.lat != null ? cur : null); rec = {...base, status:"unsure", lat:p ? round6(p.lat) : null, lon:p ? round6(p.lon) : null}; }
   else if (kind === "note"){ if (!cur) return; rec = {...cur, note, geonameId:gid, country:co, by:base.by || cur.by, at:base.at}; }
   else if (kind === "reset") rec = null;
@@ -2858,6 +2862,7 @@ async function mergeFiles(files){
 // in its native columns and checked.by/when/notes; the source values go to review_original_*.
 // An uncertain row keeps its source values; the proposal goes to review_proposed_*. Undecided rows are unchanged.
 // review_auto_* describe the source position; they are empty when a decision moved the row.
+// "No place of issue" empties the coordinates and the GeoNames ID (the country stays unless the decision sets one) and the review_auto_* columns.
 function doExport(){
   const scope = document.querySelector('input[name="expScope"]:checked').value;
   const m = S.meta.map, width = S.meta.columns.length;
@@ -2869,12 +2874,17 @@ function doExport(){
     if (scope === "touched" && !rec) continue;
     const r = [...S.rows[i], ...added.map(() => "")];
     const orig = [r[m.lat], r[m.lon], r[ix.geonameId], r[ix.country]];
-    const rv = resolveRec(rr), gv = resolveRec(gr), place = placeOf(rv, gv);
+    const rv = resolveRec(rr), gv = resolveRec(gr), place = rec && rec.status === "none" ? null : placeOf(rv, gv);
     let proposed = ["", "", ""], moved = false;
+    if (rec && rec.status === "none"){
+      // no place of issue: no coordinates and no GeoNames ID (the country stays); the automatic check is left out
+      r[m.lat] = r[m.lon] = r[ix.geonameId] = ""; moved = true;
+    }
     if (rec){
       const src = rv && rv.lat != null ? rv : gv && gv.lat != null ? gv : null;
       const val = f => rv && rv[f] != null ? rv[f] : gv && gv[f] != null ? gv[f] : null;
-      if (rec.status === "unsure"){
+      if (rec.status === "none"){ if (rec.country != null) r[ix.country] = rec.country; }
+      else if (rec.status === "unsure"){
         // Uncertain: the source values stay; the proposal goes to review_proposed_*.
         proposed = [src ? src.lat : "", src ? src.lon : "", val("geonameId") ?? ""];
       } else {
