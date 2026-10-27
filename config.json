@@ -40,5 +40,10 @@
   "autoDir": "annotations/auto",
   "gazetteerDir": "annotations/gazetteer",
   "nearbyKm": 5,
-  "output": "annotations/output/placeofissuing_geonames_reviewed.tsv"
+  "output": "annotations/output/placeofissuing_geonames_reviewed.tsv",
+  "llm": {
+    "model": "deepseek-v4.1-flash",
+    "dir": "annotations/llm",
+    "endpoint": ""
+  }
 }

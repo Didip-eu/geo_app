@@ -925,6 +925,11 @@ dialog::backdrop{ background:rgba(10,20,28,.45); }
 .chiplabel{ font-size:.75rem; color:var(--muted); margin-right:2px; align-self:center; }
 .verdict{ padding:10px 12px; border-radius:6px; background:var(--soft); border-left:4px solid var(--au-pend); font-size:.875rem; }
 .verdict b{ display:block; font-size:1rem; margin-bottom:2px; }
+.llm-ic{ background:transparent; }
+.llm-ic span{ display:block; width:14px; height:14px; border-radius:50%; background:var(--panel); border:3px double var(--ink); }
+.llmrow .cmain{ display:grid; gap:2px; min-width:0; }
+.llmwhy{ font-size:.8125rem; }
+.llmraw{ white-space:pre-wrap; font-size:.75rem; max-height:200px; overflow:auto; }
 .cand-ic{ background:transparent; }
 .cand-ic span{ display:block; width:12px; height:12px; transform:rotate(45deg); background:var(--panel); border:2px solid var(--ink); }
 .form{ display:grid; gap:12px; }
@@ -1755,6 +1760,201 @@ async function checkOwn(g){
   if (S.sel && S.sel.g === g){ renderDetail(); drawSel(); }
 }
 
+/* LLM suggestions (config.json "llm"). The app builds the prompt, and parses and checks the answer (Nominatim, then
+   Wikidata for the GeoNames ID). Transport: with an "endpoint" the browser calls the API itself, with the key from the
+   private data branch (<dir>/key.json); without one the request is committed to <dir>/requests/<login>.json and a
+   GitHub Action (.github/workflows/llm-suggest.yml, app/scripts/llm_suggest.py) writes the answer to
+   <dir>/results/<login>.json. Answers are shared: every annotator sees them. */
+const LLM = {res:new Map(), myRes:new Map(), req:new Map(), failed:new Map(), wait:new Map(), err:new Map(), ver:new Map(), key:null, pollT:0};
+const LLM_WAIT = 300000, LLM_MAX_TOKENS = 12000;
+function llmCfg(){ const c = G.on && G.cfg && G.cfg.llm; return c && c.model ? Object.assign({dir:"annotations/llm", endpoint:""}, c) : null; }
+// answered: there is an answer to this request, or it failed (a failed request keeps the earlier answer)
+const llmAnswered = (k, q) => !!q && ((LLM.res.get(k) || {}).reqAt === q.at || (LLM.failed.get(k) || {}).reqAt === q.at);
+function llmMessages(g){
+  const co = groupSrc(g, "country").v, a = S.auto.get(g.key);
+  const ids = g.rows.slice(0, 15).map(rowTitle);
+  // the source's country and coordinates come from an earlier geocoding of the name alone: shown as such, so that
+  // the model does not take them as evidence (it did: "Lack" stayed in Poland although the fonds is Freising's)
+  const user = [
+    `Place of issue as written in the charter: "${g.name}"`,
+    `Number of charters with this place of issue: ${g.rows.length}`,
+    `Charter identifiers (archive / fonds / charter, mostly with the date)${g.rows.length > ids.length ? `, first ${ids.length}` : ""}:`,
+    ...ids.map(s => "- " + s),
+    ...(g.lat != null || co ? [`An earlier automatic geocoding, from the name alone, put it at: ${[co, g.lat != null ? `${fmt(g.lat)}, ${fmt(g.lon)}` : ""].filter(Boolean).join(", ")}${a && a.rv ? ` (OpenStreetMap there: ${a.rv})` : ""}. This is often wrong (German or Latin names matched to look-alike places in other countries); do not use it as evidence.`] : []),
+    "",
+    "Identify the settlement this name refers to today. The fonds tells who issued or kept the charters: the place of issue is usually in the issuer's lordship or on the issuer's itinerary at that date, so think about who issued them and where they were active. Consider Latin, German, Hungarian, Slavic and other historical forms, spelling variants, similarity of parts of the name (e.g. Pirpam -> Herzogbirbaum / Maisbirbaum), prefixes or suffixes added later, places that were split or renamed, and borders that changed. If several neighbouring places are equally possible, list each of them.",
+    "Answer with JSON only, no other text, and keep each reason short:",
+    `{"candidates":[{"name":"modern official name","country":"ISO 3166-1 alpha-2 code, lower case","region":"region or district","lat":0.0,"lon":0.0,"geonames_id":null,"confidence":"high|medium|low","reason":"one or two sentences"}],"no_place":false,"comment":""}`,
+    "At most 4 candidates, the most probable first. geonames_id only if you are sure of it, otherwise null. If the text means that no place is given (sine loco, o. O., b. m., s. l.), set no_place to true and leave candidates empty."].join("\n");
+  return [{role:"system", content:"You are an expert in the historical geography of medieval and early modern Central Europe and in diplomatics. You identify the places of issue of charters from the Monasterium.net archive and map them to modern settlements."},
+    {role:"user", content:user}];
+}
+function llmParse(r){
+  if (!r || r.error || !r.content) return null;
+  const s = String(r.content).replace(/<think>[\s\S]*?<\/think>/g, ""), i = s.indexOf("{"), j = s.lastIndexOf("}");
+  let o; try { o = JSON.parse(s.slice(i, j + 1)); } catch(e){ return null; }
+  const num = x => typeof x === "number" && isFinite(x) ? x : (typeof x === "string" && x.trim() && isFinite(+x) ? +x : null);
+  const cands = (Array.isArray(o.candidates) ? o.candidates : []).filter(c => c && c.name).slice(0, 5).map(c => {
+    const lat = num(c.lat), lon = num(c.lon), gid = String(c.geonames_id ?? "").trim();
+    return {name:String(c.name), country:String(c.country || "").trim().toLowerCase(), region:String(c.region || ""), lat: lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? lat : null,
+      lon: lat != null && lon != null ? lon : null, gid: /^\d{1,10}$/.test(gid) ? gid : "", conf:String(c.confidence || ""), reason:String(c.reason || "")};
+  });
+  return {cands, noPlace: !!o.no_place, comment:String(o.comment || "")};
+}
+function ccName(cc){ try { return /^[a-z]{2}$/.test(cc) ? new Intl.DisplayNames(["en"], {type:"region"}).of(cc.toUpperCase()) : cc; } catch(e){ return cc; } }
+async function wdGid(q){
+  const r = await fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${encodeURIComponent(q)}&props=claims&format=json&origin=*`);
+  if (!r.ok) throw {message:"Wikidata returned an error (" + r.status + ")."};
+  return String((await r.json()).entities?.[q]?.claims?.P1566?.[0]?.mainsnak?.datavalue?.value || "");
+}
+// each candidate: the OSM place of that name (in its country) nearest to the LLM's position, within 50 km; its GeoNames ID via Wikidata
+async function llmVerify(g, p){
+  const sig = LLM.res.get(g.key).at; if ((LLM.ver.get(g.key) || {}).sig === sig) return;
+  const v = {sig, c:p.cands.map(() => null)}; LLM.ver.set(g.key, v);
+  for (const [i, c] of p.cands.entries()){
+    try {
+      const prm = {q:c.name, format:"jsonv2", limit:5, extratags:1, "accept-language":"en"}; if (/^[a-z]{2}$/.test(c.country)) prm.countrycodes = c.country;
+      const best = ((await nomi("search", prm)) || []).map(r => ({r, d: c.lat != null ? dist(c, {lat:+r.lat, lon:+r.lon}) : null})).sort((a, b) => (a.d ?? 0) - (b.d ?? 0))[0];
+      if (!best || (best.d != null && best.d > 50)) v.c[i] = {found:false};
+      else {
+        const o = {found:true, lat:+best.r.lat, lon:+best.r.lon, x:shortDisp(best.r.display_name), d:best.d, ot:best.r.osm_type || "", oi:best.r.osm_id ?? "", wd:(best.r.extratags && best.r.extratags.wikidata) || "", gid:""};
+        if (o.wd) try { o.gid = await wdGid(o.wd); } catch(e){}
+        v.c[i] = o;
+      }
+    } catch(e){ v.c[i] = {found:false, err:e.message || "search failed"}; }
+    if (LLM.ver.get(g.key) !== v) return;
+    if (S.sel && S.sel.g === g){ renderDetail(); drawSel(); }
+  }
+}
+// what "Use" takes: the checked OSM position and GeoNames ID if there are any, else the LLM's own values
+function llmPick(g, i){
+  const p = llmParse(LLM.res.get(g.key)), c = p && p.cands[i]; if (!c) return null;
+  const v = ((LLM.ver.get(g.key) || {}).c || [])[i];
+  const pos = v && v.found ? {lat:v.lat, lon:v.lon} : c.lat != null ? {lat:c.lat, lon:c.lon} : null;
+  return {c, v, pos, gid:(v && v.gid) || c.gid, country:ccName(c.country)};
+}
+function llmFiles(){
+  const d = llmCfg().dir, stamp = () => new Date().toISOString();
+  return {
+    q: {path:`${d}/requests/${G.login}.json`,
+      build: () => ({login:G.login, updated:stamp(), requests:Object.fromEntries([...LLM.req].filter(([k, q]) => !llmAnswered(k, q)))}),
+      merge: remote => { for (const [k,x] of Object.entries(remote.requests || {})){ const o = LLM.req.get(k); if (!o || (x.at||"") > (o.at||"")) LLM.req.set(k, x); } }},
+    r: {path:`${d}/results/${G.login}.json`,
+      build: () => ({login:G.login, updated:stamp(), results:Object.fromEntries(LLM.myRes)}),
+      merge: remote => { for (const [k,x] of Object.entries(remote.results || {})){ const o = LLM.myRes.get(k); if (!o || (x.at||"") > (o.at||"")) LLM.myRes.set(k, x); } }},
+  };
+}
+async function llmDirect(C, q){
+  if (!LLM.key){
+    try { LLM.key = String(JSON.parse(await ghRaw(`${C.dir}/key.json`, G.db)).key || ""); }
+    catch(e){ throw {message: e.status === 404 ? `No API key: put {"key": "…"} into ${C.dir}/key.json on the ${G.db} branch.` : e.message || "Cannot read the API key."}; }
+  }
+  let r;
+  try { r = await fetch(C.endpoint, {method:"POST", headers:{"Content-Type":"application/json", Authorization:"Bearer " + LLM.key},
+    body:JSON.stringify({model:q.model, messages:q.messages, temperature:0.2, max_tokens:LLM_MAX_TOKENS})}); }
+  catch(e){ throw {message:"The LLM server is unreachable (network or CORS)."}; }
+  const base = {reqAt:q.at, at:new Date().toISOString(), by:q.by, name:q.name, model:q.model};
+  if (!r.ok){ let m = ""; try { m = (await r.text()).slice(0, 300); } catch(e){} if (r.status === 401) LLM.key = null; return {...base, error:`HTTP ${r.status} ${m}`.trim()}; }
+  const ch = ((await r.json()).choices || [])[0] || {};
+  // the model's reasoning counts against max_tokens: a cut-off answer is not valid JSON
+  if (ch.finish_reason === "length") return {...base, error:"The answer was cut off (max_tokens)."};
+  return {...base, content:(ch.message && ch.message.content) || ""};
+}
+async function askLlm(g){
+  const C = llmCfg(); if (!C || !g.name) return;
+  if (G.readOnly || !G.token){ toast("Log in with a GitHub token to ask the LLM."); return; }
+  const q = {at:new Date().toISOString(), by:G.login, name:g.name, model:C.model, messages:llmMessages(g)};
+  LLM.wait.set(g.key, {since:Date.now(), at:q.at}); LLM.err.delete(g.key);
+  if (S.sel && S.sel.g === g) renderDetail();
+  try {
+    await ensureBranch();
+    if (C.endpoint){
+      const res = await llmDirect(C, q);
+      LLM.wait.delete(g.key);
+      if (res.error){ LLM.err.set(g.key, "The LLM answered with an error: " + res.error); if (S.sel && S.sel.g === g) renderDetail(); return; }
+      LLM.res.set(g.key, res); LLM.myRes.set(g.key, res);
+      try { await commitFiles([llmFiles().r], `${G.login}: LLM answer for ${g.name}`); } catch(e){ toast("The answer could not be saved to GitHub; it is shown only here."); }
+    } else {
+      LLM.req.set(g.key, q);
+      await commitFiles([llmFiles().q], `${G.login}: LLM request for ${g.name}`);
+      llmPoll();
+    }
+  } catch(e){ LLM.wait.delete(g.key); LLM.err.set(g.key, e.message || "The LLM request failed."); }
+  if (S.sel && S.sel.g === g){ renderDetail(); drawSel(); }
+}
+// results of every annotator (newest answer per place wins); on the first load also this user's open requests
+async function pullLlm(initial){
+  const C = llmCfg(); if (!C) return false;
+  const me = (G.login || "").toLowerCase(); let changed = false;
+  for (const f of await ghList(C.dir + "/results", G.db)){
+    if (f.type !== "file" || !f.name.endsWith(".json") || G.shas.get(f.path) === f.sha) continue;
+    let data; try { data = JSON.parse(await ghRaw(f.path, G.db)); } catch(e){ continue; }
+    const mine = me && f.name.slice(0, -5).toLowerCase() === me;
+    for (const [k,x] of Object.entries(data.results || {})){
+      const o = LLM.res.get(k); if (!o || (x.at||"") > (o.at||"")) LLM.res.set(k, x);
+      if (mine){ const m = LLM.myRes.get(k); if (!m || (x.at||"") > (m.at||"")) LLM.myRes.set(k, x); }
+    }
+    for (const [k,x] of Object.entries(data.errors || {})){ const o = LLM.failed.get(k); if (!o || (x.at||"") > (o.at||"")) LLM.failed.set(k, x); }
+    G.shas.set(f.path, f.sha); changed = true;
+  }
+  if (initial && G.login) try { llmFiles().q.merge(JSON.parse(await ghRaw(llmFiles().q.path, G.db))); } catch(e){ if (e.status && e.status !== 404) throw e; }
+  for (const [k, w] of LLM.wait){
+    const r = LLM.res.get(k), f = LLM.failed.get(k);
+    if (f && f.reqAt === w.at){ LLM.wait.delete(k); changed = true; LLM.err.set(k, "The LLM answered with an error: " + f.error); continue; }
+    if (!r || r.reqAt !== w.at) continue;
+    LLM.wait.delete(k); changed = true;
+    if (!(S.sel && S.sel.g.key === k)) toast(`LLM answer for “${r.name}” arrived.`);
+  }
+  return changed;
+}
+// while a request waits for the Action: look for the answer every 15 s, give up after 5 minutes
+function llmPoll(){
+  if (LLM.pollT) return;
+  LLM.pollT = setTimeout(async () => {
+    LLM.pollT = 0;
+    let changed = false;
+    try { changed = await pullLlm(false); } catch(e){}
+    for (const [k, w] of LLM.wait) if (Date.now() - w.since > LLM_WAIT){ LLM.wait.delete(k); LLM.err.set(k, "No answer after 5 minutes. It may still come (reload later); otherwise check that the LLM workflow is on the data branch and the DHINFRA_API_KEY secret is set (app/README.md)."); changed = true; }
+    if (changed && S.sel){ renderDetail(); drawSel(); }
+    if (LLM.wait.size) llmPoll();
+  }, 15000);
+}
+function llmHtml(g){
+  const C = llmCfg(); if (!C || !g.name) return "";
+  const r = LLM.res.get(g.key), q = LLM.req.get(g.key), w = LLM.wait.get(g.key), er = LLM.err.get(g.key), p = llmParse(r);
+  let h = "";
+  if (w) h += `<p class="hint">${C.endpoint ? "Asking" : "Asked through GitHub; the answer usually takes 30–60 seconds"} (${esc(C.model)})…</p>`;
+  else if (q && !llmAnswered(g.key, q) && (!r || (r.at||"") < q.at) && !er) h += `<p class="hint">Asked on ${esc(df.format(new Date(q.at)))}; no answer yet.</p>`;
+  if (er) h += `<p class="err">${esc(er)}</p>`;
+  if (r){
+    h += `<p class="hint" style="margin:0 0 6px">${esc(r.model || "LLM")} · asked by ${esc(r.by || "?")}, ${esc(df.format(new Date(r.at)))}${r.name !== g.name ? ` (for “${esc(r.name)}”)` : ""}</p>`;
+    if (!p) h += `<p class="err">The answer could not be read.</p><details><summary>Answer</summary><pre class="llmraw">${esc(r.content)}</pre></details>`;
+    else if (p){
+      if (p.noPlace) h += `<p class="note">The LLM reads this as “no place of issue” (sine loco).</p>`;
+      if (!p.cands.length && !p.noPlace) h += `<p class="hint">The LLM has no candidate.</p>`;
+      if (p.cands.length){
+        llmVerify(g, p);
+        const ver = (LLM.ver.get(g.key) || {}).c || [];
+        h += `<ul class="sugg">${p.cands.map((c, i) => {
+          const v = ver[i], pk = llmPick(g, i);
+          const chk = !v ? `<span class="m">Checking in OSM…</span>`
+            : v.found ? `<span class="m">OSM: ${esc(v.x)}${v.d != null ? ` · ${kmTxt(v.d)} from the LLM's position` : ""}${v.gid ? ` · GeoNames ${gnLink(v.gid)} (via Wikidata)` : ""}</span>`
+            : `<span class="m">Not found in OSM${c.lat != null ? "; the position is the LLM's estimate" : ""}.</span>`;
+          const gidTxt = c.gid && (!v || c.gid !== v.gid) ? `<span class="m">GeoNames given by the LLM: ${gnLink(c.gid)}${v && v.gid ? " (differs from Wikidata)" : " (not checked)"}</span>` : "";
+          return `<li class="llmrow"><div class="cmain"><span><b>${esc(c.name)}</b> <span class="m">${esc([c.region, ccName(c.country)].filter(Boolean).join(", "))}${c.conf ? ` · ${esc(c.conf)} confidence` : ""}</span></span>
+            ${c.reason ? `<span class="llmwhy">${esc(c.reason)}</span>` : ""}${chk}${gidTxt}</div>
+            <button class="btn small" type="button" data-llm="${i}" ${pk && pk.pos ? "" : "disabled"} title="Move the point here and fill in the GeoNames ID and the country; save it with a decision below">Use</button></li>`; }).join("")}</ul>`;
+      }
+      if (p.comment) h += `<p class="hint">${esc(p.comment)}</p>`;
+    }
+  }
+  const busy = !!w, ro = G.readOnly || !G.token;
+  return `<div class="sect"><h3>LLM suggestion</h3>${h}
+    <div class="acts"><button class="btn small" type="button" id="btnLlm" ${busy || ro ? "disabled" : ""}>${r ? "Ask again" : "Ask the LLM"}</button></div>
+    ${ro ? `<p class="hint">Log in with a GitHub token to ask the LLM.</p>` : !r && !w ? `<p class="hint">For historical or unusual names: ${esc(C.model)} proposes modern places with its reasoning; they are checked in OSM and Wikidata. You decide.</p>` : ""}
+  </div>`;
+}
+
 const RUN = {on:false, done:0, total:0, msg:""};
 function runStatus(msg){ RUN.msg = msg || ""; renderRun(); }
 function renderRun(){
@@ -1958,6 +2158,10 @@ function drawSel(){
       .bindTooltip(`OSM match: ${esc(c.n)}${c.t ? " (" + esc(c.t) + ")" : ""}${c.d != null ? " · " + kmTxt(c.d) : ""}<br>Click for details`, {direction:"top", offset:[0,-8]})
       .on("click", ev => { if (S.placing || S.selecting) return; L.DomEvent.stopPropagation(ev); L.popup({maxWidth:320}).setLatLng([c.lat, c.lon]).setContent(candPopup(c)).openOn(map); }).addTo(candLayer);
   }
+  const lp = llmCfg() && llmParse(LLM.res.get(S.sel.g.key));
+  if (lp) lp.cands.forEach((c, i) => { const pk = llmPick(S.sel.g, i); if (!pk || !pk.pos) return;
+    L.marker([pk.pos.lat, pk.pos.lon], {pane:"cand", keyboard:false, icon:L.divIcon({className:"llm-ic", html:"<span></span>", iconSize:[16,16], iconAnchor:[8,8]})})
+      .bindTooltip(`LLM suggestion: ${esc(c.name)}${pk.v && pk.v.found ? "" : " (position estimated by the LLM)"}`, {direction:"top", offset:[0,-8]}).addTo(candLayer); });
   // same-name groups: dashed line to the current position with the distance; outliers (> t2 km) ringed
   const outC = cssVar("--outlier");
   if (conf) drawPicks();
@@ -2425,10 +2629,7 @@ async function lookupGid(){
     const pos = S.gzCtx && S.gzCtx.pos;
     if (pos) arr.sort((a, b) => dist(pos, {lat:+a.lat, lon:+a.lon}) - dist(pos, {lat:+b.lat, lon:+b.lon}));
     if (!arr.length){ toast(`No OSM result with a Wikidata link for “${name}”.`); return; }
-    const q = arr[0].extratags.wikidata;
-    const r = await fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${encodeURIComponent(q)}&props=claims&format=json&origin=*`);
-    if (!r.ok) throw {message:"Wikidata returned an error (" + r.status + ")."};
-    const v = (await r.json()).entities?.[q]?.claims?.P1566?.[0]?.mainsnak?.datavalue?.value;
+    const q = arr[0].extratags.wikidata, v = await wdGid(q);
     if (!v){ toast(`${shortDisp(arr[0].display_name)} (Wikidata ${q}) has no GeoNames ID.`); return; }
     S.gz = {...S.gz, for:S.gzCtx ? S.gzCtx.target : "new", gid:String(v), name:$("#gzName").value, country:$("#gzCountry").value};
     toast(`GeoNames ${v} via ${shortDisp(arr[0].display_name)} → Wikidata ${q}. Check it on geonames.org.`);
@@ -2535,6 +2736,7 @@ function renderDetail(){
     ${sa && sa.c.length ? `<ul class="sugg" style="margin-top:8px">${sa.c.map(c => `<li class="osmrow"><div class="cmain"><span><b>${esc(c.n)}</b>${candType(c)} <span class="m">${esc(c.x)}${c.d != null ? " · " + kmTxt(c.d) : ""}</span></span>${candLinks(c)}</div><button class="btn small" type="button" data-take="${c.lat},${c.lon}">Use</button></li>`).join("")}</ul>` : ""}
     <div class="acts">${g.name ? `<button class="btn small" type="button" id="btnRecheck">${a ? "Check again" : "Check now"}</button>` : ""}</div>
   </div>`;
+  html += llmHtml(g);
 
   html += `<div class="sect"><h3>Position</h3>
     <dl class="coords">
@@ -3241,6 +3443,7 @@ async function pullGH(initial){
     G.shas.set(f.path, f.sha); changed = true;
   }
   if (initial && !sawMyGz && G.myGz.size){ gzNewer = G.myGz.size; for (const k of G.myGz.keys()) markDirty(G.dirtyZ, k); }
+  try { if (await pullLlm(initial)){ changed = true; if (S.sel){ renderDetail(); drawSel(); } } } catch(e){ console.warn("LLM results:", e.message); }
   if ((gzNewer || localNewer) && !G.readOnly && G.token) scheduleSave();   // changes kept in this browser from an earlier session
   if (changed || initial){ recomputePlaces(); recomputeGH(); saveAutoSoon(); refreshAll(); }
   G.lastPull = new Date(); ghStatus();
@@ -3463,6 +3666,10 @@ function wire(){
     if (t.id === "btnRecheck"){ const g = S.sel.g; t.disabled = true; t.textContent = "Checking…"; S.auto.delete(g.key); checkOne(g).then(() => { if (S.sel && S.sel.g === g) fitSel(); }); if (ownCC()){ S.ccAuto.delete(g.key); checkOwn(g); } return; }
     const a = t.closest("[data-act]"); if (a){ act(a.dataset.act); return; }
     const uc = t.closest("[data-useco]"); if (uc){ $("#coIn").value = S.draftCo = uc.dataset.useco; S.coTouched = true; if (S.pending) { $("#coHint").hidden = true; } else act("note"); return; }
+    if (t.id === "btnLlm"){ askLlm(S.sel.g); return; }
+    const ll = t.closest("[data-llm]"); if (ll){ const pk = llmPick(S.sel.g, +ll.dataset.llm); if (!pk || !pk.pos) return;
+      if (pk.gid) S.draftGid = pk.gid; if (pk.country){ S.draftCo = pk.country; S.coTouched = true; }
+      setPending(pk.pos, true); flyTo(pk.pos, 11); toast(`${pk.c.name}: position${pk.gid ? ", GeoNames ID" : ""}${pk.country ? " and country" : ""} filled in. Save it with a decision.`); return; }
     const tk = t.closest("[data-take]"); if (tk){ const [la, lo] = tk.dataset.take.split(",").map(Number); setPending({lat:la, lon:lo}, true); flyTo({lat:la, lon:lo}, 11); return; }
     const j = t.closest("[data-jump]"); if (j){ const g = S.gByKey.get(j.dataset.jump); if (g) selectGroup(g); return; }
     const r = t.closest("[data-row]"); if (r){ selectRow(+r.dataset.row); return; }
