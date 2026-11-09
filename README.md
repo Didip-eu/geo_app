@@ -129,7 +129,13 @@ The box at the top of the detail view makes one **gazetteer place** out of all s
 3. **Canonical name:** e.g. "Győr" or "Vienna". It's proposed from OSM or the most frequent spelling; change it if needed. After selecting many rows, check it again: it follows the checked spellings.
 4. **GeoNames ID:** proposed from the checked rows. **Look up** asks OSM and Wikidata. Always confirm it with the geonames.org link.
 5. **Existing places:** if a place with the same GeoNames ID or a similar name nearby already exists, the box offers **Add to "…"**. Use that instead of creating a duplicate.
-6. **Confirm as one place** (or Enter). Everything is saved in one step, and the next unassigned name opens.
+6. **Confirm as one place** (or Enter). Everything is saved in one step. If **After confirming, open the next unassigned name cluster** is ticked (the default), the next unassigned name opens; untick it to stay on the group you just confirmed and check the result.
+
+Before saving, the app checks the following. A warning is shown above the button; press **Confirm** again to save anyway.
+- **The GeoNames ID belongs to another place:** saving is refused. Check the ID, or add the groups to that place.
+- **The GeoNames ID of an existing place would change:** it changes for every group of that place, so it must be confirmed.
+- **The position is far from the GeoNames ID** (more than 25 km, by the ID's position on Wikidata): either the ID or the position is wrong. **Use the GeoNames position** moves the pin there.
+- A name that means no place of issue (*k. A.*, *o. O.*, *s. l.*, *b. m.*, *sine loco*, …) can't become a place: use **No place of issue** in *Decision*.
 
 A group that already belongs to a place shows **Place: …** with a **Place settings** link: rename, move, change the ID or country, or delete the place.
 
@@ -262,6 +268,19 @@ The *Ask the LLM* button sends the prompt that the app builds to the DH Infra AP
 - **Directly from the browser** (`"endpoint": "https://api.dhinfra.uni-graz.at/v1/chat/completions"`), once DH Infra allows CORS for `https://didip-eu.github.io`. The answer comes in seconds and is saved to `results/<login>.json` by the app. The key is read with the annotator's GitHub token from `annotations/llm/key.json` (`{"key": "…"}`) on the private data branch. **Never put the key into `config.json`**: the app repository and its Pages site are public.
 
 By hand, e.g. to answer open requests locally: `DHINFRA_API_KEY=… python3 app/scripts/llm_suggest.py --dir <checkout of annotations>/annotations/llm` (`--max`, `--max-tokens`, `--url`). The model's reasoning counts against `max_tokens` (12 000): a cut-off answer is reported as an error.
+
+## Fixing the gazetteer (coordinator)
+
+`app/scripts/fix_gazetteer.py` checks every gazetteer place against the position of its GeoNames ID (GeoNames API with `GEONAMES_USERNAME`, else Wikidata) and fixes them as the coordinator's own records (`<login>.json`, newer than the annotators', one batch in the log; the annotators' files are not changed):
+- a place more than 10 km (`--km`) from its ID's point is moved to that point;
+- hand-checked fixes (wrong ID, e.g. Florence with the ID of Salem) are in the `MANUAL` table of the script;
+- a place whose name means no place of issue (*k. A.*, *o. O.*, *s. l.*) is deleted, and its groups get the decision *No place of issue*.
+
+```
+git worktree add ../georef-annotations annotations
+python3 app/scripts/fix_gazetteer.py --dir ../georef-annotations/annotations --login <your login>           # plan + gazetteer_fixes.tsv
+python3 app/scripts/fix_gazetteer.py --dir ../georef-annotations/annotations --login <your login> --write   # then commit + push annotations
+```
 
 ## Running the merge by hand
 

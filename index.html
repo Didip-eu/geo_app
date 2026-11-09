@@ -1314,6 +1314,7 @@ const S = {
   fa:"all", fd:"new", q:"", inView:false, sort:"count", filtered:[],
   mineOn:false, myOn:true, assignByCountry:null, conflicts:new Map(), conflictGroups:new Set(), undo:[], rowOverride:new Set(), override:false, noteErr:"", localLog:{e:[], z:[]},
   autoNext: LS.get("gj2:autoNext", true),
+  gzNext: LS.get("gj2:gzNext", true),   // after "Confirm as one place": open the next unassigned name cluster
   showAll: LS.get("gj2:showAll", false),
   places:new Map(), placesAll:new Map(), localPlaces:new Map(),
   clusters:[], clDirty:new Set(), grid:null, gridDirty:true,
@@ -2573,12 +2574,54 @@ function placePanel(g, sets, shown){
       <input id="gzAdd" type="search" autocomplete="off" placeholder="Add by name…" value="${esc(S.addQ || "")}">
       <ul class="sugg addres" id="gzAddRes"></ul>
       ${S.gzErr ? `<p class="err" style="margin:0">${esc(S.gzErr)}</p>` : ""}
+      ${S.gzErr && S.gzUse && S.gzUse.key === g.key ? `<div><button class="btn small" type="button" id="gzUse">Use the GeoNames position (${fmt(S.gzUse.pos.lat)}, ${fmt(S.gzUse.pos.lon)})</button></div>` : ""}
       <button class="btn primary" type="button" id="gzConfirm" ${pos && !(selLock() && !S.override) ? "" : "disabled"}>${confirmLabel(checked)}</button>
-      <p class="hint" style="margin:0">${target === "update" ? `Updates “${esc(P.name)}”` : target === "existing" ? `Adds the checked groups to “${esc(ex.p.name)}”` : "Creates a new gazetteer place"} and assigns the checked groups below (unchecked groups already in this place are removed from it). Then the next unassigned name cluster opens. Enter also confirms.</p>
+      <p class="hint" style="margin:0">${target === "update" ? `Updates “${esc(P.name)}”` : target === "existing" ? `Adds the checked groups to “${esc(ex.p.name)}”` : "Creates a new gazetteer place"} and assigns the checked groups below (unchecked groups already in this place are removed from it).${S.gzNext ? " Then the next unassigned name cluster opens." : ""} Enter also confirms.</p>
+      <label class="auto"><input type="checkbox" id="gzNext" ${S.gzNext ? "checked" : ""}> After confirming, open the next unassigned name cluster</label>
     </div></div>` + pickSummary(S.gzCtx);
 }
-function confirmPlace(){
+// Names that mean "no place of issue" (k. A. = keine Angabe, o. O., s. l., b. m., sine loco …): never a gazetteer place.
+const NOPLACE_RE = /^[\s(\[]*(?:o\.\s*o|s\.\s*l|k\.\s*a|b\.\s*m|s\.\s*d|sine\s+loco|ohne\s+ort|nicht\s+angegeben|keine\s+angabe|unbekannt|unknown|-+|\?+)[\s.:;,)\]]*$/i;
+// Position of a GeoNames ID: the Wikidata item with P1566 = id, its P625. null = not known; cached per session.
+// A network error is not cached and returns undefined (the check is then skipped).
+const GIDPOS = new Map();
+async function gidPos(gid){
+  if (!/^\d+$/.test(gid || "")) return null;
+  if (GIDPOS.has(gid)) return GIDPOS.get(gid);
+  const api = qs => fetch(`https://www.wikidata.org/w/api.php?${qs}&format=json&origin=*`).then(r => r.ok ? r.json() : Promise.reject(r.status));
+  const job = (async () => {
+    const q = (await api(`action=query&list=search&srlimit=1&srsearch=${encodeURIComponent("haswbstatement:P1566=" + gid)}`)).query?.search?.[0]?.title;
+    if (!q) return null;
+    const ent = (await api(`action=wbgetentities&ids=${q}&props=claims|labels&languages=en|de|it|hu|fr`)).entities?.[q];
+    const c = ent?.claims?.P625?.[0]?.mainsnak?.datavalue?.value;
+    return c ? {lat:c.latitude, lon:c.longitude, label:(Object.values(ent.labels || {})[0] || {}).value || q, q} : null;
+  })();
+  try { const v = await Promise.race([job, new Promise((_, rej) => setTimeout(() => rej("timeout"), 8000))]); GIDPOS.set(gid, v); return v; }
+  catch(e){ return undefined; }
+}
+// Warnings before a place is saved with this name / GeoNames ID / position (T = the place being changed, or null).
+// Returns {err} (blocks), or {warn, use} (confirm again to keep; use = the GeoNames position), or {}.
+async function placeChecks(T, name, gid, pos){
+  if (NOPLACE_RE.test(name)) return {err:`“${name}” means that the charter names no place of issue. Use “No place of issue” in “Decision” below instead of a gazetteer place.`};
+  if (gid){
+    const other = [...S.places.values()].find(p => p.geonameId === gid && (!T || p.id !== T.id));
+    if (other) return {err:`GeoNames ID ${gid} already belongs to the place “${other.name}”. Check the ID, or add the groups to “${other.name}”.`};
+  }
+  const warn = [];
+  if (T && T.geonameId && gid !== T.geonameId){
+    const u = placeUsage(T.id);
+    warn.push(`This changes the GeoNames ID of “${T.name}” (${T.geonameId} → ${gid || "none"}) for all its ${nf.format(u.groups)} groups.`);
+  }
+  let use = null;
+  if (gid && pos){
+    const gp = await gidPos(gid), t2 = +S.cfg.t2 || 25;
+    if (gp && dist(gp, pos) > t2){ warn.push(`GeoNames ${gid} (${gp.label}) lies ${kmTxt(dist(gp, pos))} from the position being saved: is the ID or the position wrong?`); use = {lat:round6(gp.lat), lon:round6(gp.lon)}; }
+  }
+  return warn.length ? {warn:warn.join(" "), use} : {};
+}
+async function confirmPlace(){
   const c = S.gzCtx; if (!c || !S.sel || S.sel.kind !== "group") return;
+  if (S.gzBusy) return;
   if (G.on && G.readOnly){ toast("Log in with a GitHub token to make decisions."); return; }
   const name = ($("#gzName").value || "").trim(), gid = ($("#gzGid").value || "").trim(), country = ($("#gzCountry").value || "").trim();
   const fail = m => { S.gzErr = m; S.gz = {...S.gz, for:c.target, name, gid, country}; renderDetail(); };
@@ -2592,6 +2635,16 @@ function confirmPlace(){
   }
   const lock = selLock();
   if (lock && !S.override) return fail(`This group was decided by ${lock.by}: click “Override” above first.`);
+  S.gzBusy = true; const btn = $("#gzConfirm"); if (btn){ btn.disabled = true; btn.textContent = "Checking…"; }
+  let chk;
+  try { chk = await placeChecks(c.T, name, gid, c.pos); } finally { S.gzBusy = false; }
+  if (S.gzCtx !== c && S.sel?.g !== c.g) return;   // the selection changed while checking
+  if (chk.err){ S.gzUse = null; return fail(chk.err); }
+  if (chk.warn){
+    const sig = JSON.stringify([c.g.key, c.T ? c.T.id : "new", name, gid, round6(c.pos.lat), round6(c.pos.lon)]);
+    if (S.gzAck !== sig){ S.gzAck = sig; S.gzUse = chk.use ? {key:c.g.key, pos:chk.use} : null; return fail(chk.warn + " Confirm again to save it as it is."); }
+  }
+  S.gzAck = null; S.gzUse = null;
   const at = new Date().toISOString(), by = myName();
   const place = Object.assign({}, c.T || {id:newPlaceId(), note:""}, {name, lat:round6(c.pos.lat), lon:round6(c.pos.lon), geonameId:gid, country, by, at});
   delete place.deleted;
@@ -2609,7 +2662,7 @@ function confirmPlace(){
   S.override = false;
   endBatch(); S.pending = null; S.gzErr = "";
   toast(`“${name}”: ${nf.format(c.checked.length)} group${c.checked.length === 1 ? "" : "s"} assigned${removed ? `, ${nf.format(removed)} removed` : ""}.`);
-  goNextCluster(c.g);
+  if (S.gzNext) goNextCluster(c.g); else { refreshAll(); selectGroup(c.g, false); }
 }
 // next name cluster without any place assignment, largest document count first
 function goNextCluster(from){
@@ -2619,6 +2672,7 @@ function goNextCluster(from){
 }
 async function lookupGid(){
   const name = ($("#gzName").value || "").trim(), btn = $("#gzLookup"); if (!name) return;
+  const sel = S.sel;   // an answer that arrives after another group was opened is dropped
   btn.disabled = true; btn.textContent = "Looking up…";
   try {
     // not limited to "My countries": a historical place of one country often lies in another today (Cehăluț, once in
@@ -2630,11 +2684,12 @@ async function lookupGid(){
     if (pos) arr.sort((a, b) => dist(pos, {lat:+a.lat, lon:+a.lon}) - dist(pos, {lat:+b.lat, lon:+b.lon}));
     if (!arr.length){ toast(`No OSM result with a Wikidata link for “${name}”.`); return; }
     const q = arr[0].extratags.wikidata, v = await wdGid(q);
+    if (S.sel !== sel) return;
     if (!v){ toast(`${shortDisp(arr[0].display_name)} (Wikidata ${q}) has no GeoNames ID.`); return; }
     S.gz = {...S.gz, for:S.gzCtx ? S.gzCtx.target : "new", gid:String(v), name:$("#gzName").value, country:$("#gzCountry").value};
     toast(`GeoNames ${v} via ${shortDisp(arr[0].display_name)} → Wikidata ${q}. Check it on geonames.org.`);
   } catch(e){ toast(e.message || "The lookup failed."); }
-  finally { if (S.sel) renderDetail(); }
+  finally { if (S.sel && S.sel === sel) renderDetail(); }
 }
 function openPlaceSettings(){
   const P = S.sel && gPlace(S.sel.g); if (!P) return;
@@ -2644,13 +2699,23 @@ function openPlaceSettings(){
   $("#plInfo").textContent = `Id ${P.id} · ${nf.format(u.groups)} groups, ${nf.format(u.docs)} documents · last change: ${P.by || "?"}${P.at ? ", " + df.format(new Date(P.at)) : ""}`;
   $("#plErr").textContent = ""; $("#dlgPlace").showModal();
 }
-function savePlaceSettings(){
+async function savePlaceSettings(){
   const P = S.plEdit; if (!P) return;
   if (G.on && G.readOnly){ $("#plErr").textContent = "Log in with a GitHub token to change places."; return; }
   const name = $("#plName").value.trim(), pos = parseCoordInput($("#plPos").value), gid = $("#plGid").value.trim();
   if (!name){ $("#plErr").textContent = "Enter a canonical name."; return; }
   if (!pos){ $("#plErr").textContent = "Cannot read the position. Example: 48.2082, 16.3738"; return; }
   if (gid && !/^\d{1,10}$/.test(gid)){ $("#plErr").textContent = "A GeoNames ID is a whole number, e.g. 2761369."; return; }
+  $("#plErr").textContent = "Checking…";
+  const chk = await placeChecks(P, name, gid, pos);
+  $("#plErr").textContent = "";
+  if (S.plEdit !== P) return;
+  if (chk.err){ $("#plErr").textContent = chk.err; return; }
+  if (chk.warn){
+    const sig = JSON.stringify([P.id, name, gid, round6(pos.lat), round6(pos.lon)]);
+    if (S.plAck !== sig){ S.plAck = sig; $("#plErr").textContent = chk.warn + (chk.use ? ` GeoNames position: ${fmt(chk.use.lat)}, ${fmt(chk.use.lon)} (paste it into Position).` : "") + " Save again to keep it as it is."; return; }
+  }
+  S.plAck = null;
   withAction("decide", () => setPlace(Object.assign({}, P, {name, lat:round6(pos.lat), lon:round6(pos.lon), geonameId:gid, country:$("#plCountry").value.trim(), note:$("#plNote").value.trim(), by:myName(), at:new Date().toISOString()})));
   endBatch(); $("#dlgPlace").close(); S.gz = {}; refreshAll(); toast(`Place “${name}” saved.`);
 }
@@ -3660,6 +3725,7 @@ function wire(){
     const ad = t.closest("[data-add]");
     if (ad){ const h = S.gByKey.get(ad.dataset.add); if (h){ S.added.set(h.key, h); S.pick.set(h.key, true); renderDetail(); drawSel(); const i = $("#gzAdd"); if (i) i.focus(); } return; }
     if (t.id === "gzLookup"){ lookupGid(); return; }
+    if (t.id === "gzUse" && S.gzUse){ const p = S.gzUse.pos; S.gzUse = null; S.gzErr = ""; S.gzAck = null; setPending(p, true); flyTo(p, 11); return; }
     if (t.id === "btnPlaceSettings"){ openPlaceSettings(); return; }
     if (t.id === "btnDiscard"){ S.pending = null; S.coordErr = ""; S.draftCo = null; S.coTouched = false; renderDetail(); drawSel(); return; }
     if (t.id === "coordGo"){ applyCoordInput(); return; }
@@ -3686,6 +3752,7 @@ function wire(){
   });
   det.addEventListener("change", e => {
     if (e.target.id === "autoNext"){ S.autoNext = e.target.checked; LS.set("gj2:autoNext", S.autoNext); }
+    if (e.target.id === "gzNext"){ S.gzNext = e.target.checked; LS.set("gj2:gzNext", S.gzNext); renderDetail(); }
     if (e.target.id === "showAll"){ S.showAll = e.target.checked; LS.set("gj2:showAll", S.showAll); drawData(); }
     if (e.target.dataset && e.target.dataset.pick){ S.pick.set(e.target.dataset.pick, e.target.checked); renderDetail(); }
     if (e.target.name === "gzTarget"){ S.gz = {...S.gz, target:e.target.value}; renderDetail(); }
